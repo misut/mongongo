@@ -10,6 +10,8 @@ kotlinx-datetime = "0.6.2"
 kotlinx-io = "0.7.0"
 kotlinx-serialization = "1.8.0"
 
+mongodb = "5.3.1"
+
 spotless = "6.25.0"
 
 [libraries]
@@ -26,6 +28,10 @@ kotlinx-datetime = { module = "org.jetbrains.kotlinx:kotlinx-datetime", version.
 kotlinx-io-core = { module = "org.jetbrains.kotlinx:kotlinx-io-core", version.ref = "kotlinx-io" }
 kotlinx-serialization-core = { module = "org.jetbrains.kotlinx:kotlinx-serialization-core", version.ref = "kotlinx-serialization" }
 kotlinx-serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serialization-json", version.ref = "kotlinx-serialization" }
+
+mongodb-bson-kotlinx = { module = "org.mongodb:bson-kotlinx", version.ref = "mongodb" }
+mongodb-driver-kotlin-sync = { module = "org.mongodb:mongodb-driver-kotlin-sync", version.ref = "mongodb" }
+mongodb-driver-kotlin-coroutine = { module = "org.mongodb:mongodb-driver-kotlin-coroutine", version.ref = "mongodb" }
 
 [bundles]
 

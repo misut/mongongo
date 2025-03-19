@@ -20,6 +20,11 @@ kotlin {
         jvmMain.dependencies {
         }
 
-        jvmTest.dependencies {}
+        jvmTest.dependencies {
+            implementation(libs.embed.mongo)
+            implementation(libs.kotlin.reflect)
+            implementation(libs.kotlin.test)
+            implementation(libs.mongodb.driver.kotlin.sync)
+        }
     }
 }
