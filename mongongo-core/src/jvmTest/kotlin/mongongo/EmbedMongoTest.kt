@@ -1,22 +1,30 @@
 package mongongo
 
-import com.mongodb.kotlin.client.MongoClient
+import com.mongodb.kotlin.client.MongoClient as JvmMongoClient
+import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
+import kotlin.test.assertEquals
+import org.bson.Document
 
 class EmbedMongoTest {
     private val shardedEmbedMongoCluster = ShardedEmbedMongoCluster()
-    private val syncClient: MongoClient
-        get() = MongoClient.create(shardedEmbedMongoCluster.connectionString)
+    private val syncClient
+        get() = JvmMongoClient.create(shardedEmbedMongoCluster.connectionString)
 
     data class TestDocument(val name: String)
 
     @Test
-    fun test() {
-        val insertOneResult = syncClient
-            .getDatabase("test")
-            .getCollection<TestDocument>("test")
-            .insertOne(TestDocument("test"))
-        println(insertOneResult)
-        assert(false)
+    fun pingEmbeddedMongoWithJvmDriverAndMongongoClient() = runTest {
+        syncClient.use { client ->
+            val result = client.getDatabase("admin").runCommand(Document("ping", 1))
+            assertEquals(1.0, result.getDouble("ok"))
+        }
+
+        val client = MongoClient.connect(shardedEmbedMongoCluster.connectionString.connectionString)
+        try {
+            assertEquals(1.0, client.ping().ok)
+        } finally {
+            client.close()
+        }
     }
 }

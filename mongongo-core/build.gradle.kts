@@ -1,24 +1,27 @@
 import org.jetbrains.kotlin.gradle.ExperimentalKotlinGradlePluginApi
 
-plugins {
-    id(libs.plugins.kotlin.multiplatform.get().pluginId)
-}
+plugins { id(libs.plugins.kotlin.multiplatform.get().pluginId) }
 
 kotlin {
+    jvm()
+    macosArm64()
+
     @OptIn(ExperimentalKotlinGradlePluginApi::class)
     compilerOptions { freeCompilerArgs.add("-Xexpect-actual-classes") }
 
     sourceSets {
-        jvm()
-
         commonMain.dependencies {
+            implementation(libs.ktor.network)
+            implementation(libs.kotlinx.coroutines.core)
         }
 
         commonTest.dependencies {
+            implementation(libs.ktor.network)
+            implementation(libs.kotlin.test)
+            implementation(libs.kotlinx.coroutines.test)
         }
 
-        jvmMain.dependencies {
-        }
+        jvmMain.dependencies {}
 
         jvmTest.dependencies {
             implementation(libs.embed.mongo)
