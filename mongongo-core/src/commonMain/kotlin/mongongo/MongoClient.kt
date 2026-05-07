@@ -1,10 +1,19 @@
 package mongongo
 
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
 public data class MongoCommandResult(
     val ok: Double,
+    val raw: BsonDocument
+)
+
+public data class InsertOneResult(
+    val acknowledged: Boolean,
+    val insertedId: BsonValue?,
     val raw: BsonDocument
 )
 
@@ -17,7 +26,14 @@ public data class MongoServerDescription(
 
 public class MongoCommandException(
     public val result: BsonDocument
-) : RuntimeException("MongoDB command failed with ok=${result.okValue()}")
+) : RuntimeException("MongoDB command failed with ok=${result.okValue()}${result.commandFailureSummary()}")
+
+public class MongoWriteException(
+    public val result: BsonDocument
+) : RuntimeException("MongoDB write failed${result.writeFailureSummary()}")
+
+private const val WritablePrimaryRetryAttempts = 120
+private const val WritablePrimaryRetryDelayMilliseconds = 100L
 
 public class MongoClient private constructor(
     public val connectionString: String,
@@ -37,6 +53,11 @@ public class MongoClient private constructor(
                 "\$db" to BsonString(database)
             )
         )
+    }
+
+    public fun database(name: String): MongoDatabase {
+        require(name.isNotBlank()) { "MongoDB database name cannot be blank" }
+        return MongoDatabase(client = this, name = name)
     }
 
     public suspend fun close() {
@@ -62,38 +83,116 @@ public class MongoClient private constructor(
         return MongoCommandResult(ok = ok, raw = raw)
     }
 
+    internal suspend fun insertOne(database: String, collection: String, document: BsonDocument): InsertOneResult {
+        val existingId = document["_id"]
+        val insertedId = existingId ?: BsonObjectId.generate()
+        val documentToInsert = if (existingId == null) document.withValue("_id", insertedId) else document
+        val result =
+            runCommand(
+                BsonDocument(
+                    "insert" to BsonString(collection),
+                    "documents" to BsonArray(listOf(documentToInsert)),
+                    "ordered" to BsonBoolean(true),
+                    "\$db" to BsonString(database)
+                )
+            )
+
+        result.raw.throwIfWriteFailed()
+        return InsertOneResult(acknowledged = true, insertedId = insertedId, raw = result.raw)
+    }
+
     public companion object {
         public suspend fun connect(uri: String): MongoClient {
             val connectionString = MongoConnectionStringParser.parse(uri)
-            val transport = KtorMongoTransport.connect(connectionString.primaryHost)
+            var fallback: MongoClient? = null
+            var lastFailure: Throwable? = null
+            val attempts = if (connectionString.hosts.size > 1) WritablePrimaryRetryAttempts else 1
 
-            try {
-                val hello =
-                    transport.send(
-                        requestId = 1,
-                        body =
-                            BsonDocument(
-                                "hello" to BsonInt32(1),
-                                "\$db" to BsonString("admin")
+            repeat(attempts) { attempt ->
+                for (host in connectionString.hosts) {
+                    val transport =
+                        try {
+                            KtorMongoTransport.connect(host)
+                        } catch (throwable: Throwable) {
+                            lastFailure = throwable
+                            continue
+                        }
+
+                    try {
+                        val hello =
+                            transport.send(
+                                requestId = 1,
+                                body =
+                                    BsonDocument(
+                                        "hello" to BsonInt32(1),
+                                        "\$db" to BsonString("admin")
+                                    )
                             )
-                    )
-                val ok = hello.okValue()
-                if (ok != 1.0) {
-                    throw MongoCommandException(hello)
+                        val ok = hello.okValue()
+                        if (ok != 1.0) {
+                            throw MongoCommandException(hello)
+                        }
+
+                        val candidate =
+                            MongoClient(
+                                connectionString = uri,
+                                serverDescription = hello.toServerDescription(),
+                                transport = transport,
+                                nextRequestId = 2
+                            )
+                        if (candidate.serverDescription.isWritablePrimary) {
+                            fallback?.close()
+                            return candidate
+                        }
+
+                        if (fallback == null) {
+                            fallback = candidate
+                        } else {
+                            transport.close()
+                        }
+                    } catch (throwable: Throwable) {
+                        transport.close()
+                        lastFailure = throwable
+                    }
                 }
 
-                return MongoClient(
-                    connectionString = uri,
-                    serverDescription = hello.toServerDescription(),
-                    transport = transport,
-                    nextRequestId = 2
-                )
-            } catch (throwable: Throwable) {
-                transport.close()
-                throw throwable
+                if (attempt < attempts - 1) {
+                    fallback?.close()
+                    fallback = null
+                    withContext(Dispatchers.Default) { delay(WritablePrimaryRetryDelayMilliseconds) }
+                }
             }
+
+            fallback?.let { return it }
+            throw lastFailure ?: IllegalArgumentException("MongoDB connection string must contain at least one host")
         }
     }
+}
+
+public class MongoDatabase internal constructor(
+    internal val client: MongoClient,
+    public val name: String
+) {
+    init {
+        require(name.isNotBlank()) { "MongoDB database name cannot be blank" }
+    }
+
+    public fun collection(name: String): MongoCollection {
+        require(name.isNotBlank()) { "MongoDB collection name cannot be blank" }
+        return MongoCollection(database = this, name = name)
+    }
+}
+
+public class MongoCollection internal constructor(
+    private val database: MongoDatabase,
+    public val name: String
+) {
+    init {
+        require(name.isNotBlank()) { "MongoDB collection name cannot be blank" }
+    }
+
+    public suspend fun insertOne(document: BsonDocument): InsertOneResult =
+        database.client.insertOne(database = database.name, collection = name, document = document)
 }
 
 private fun BsonDocument.toServerDescription(): MongoServerDescription =
@@ -121,3 +220,33 @@ private fun BsonDocument.intValue(name: String): Int? =
     }
 
 private fun BsonDocument.booleanValue(name: String): Boolean? = (this[name] as? BsonBoolean)?.value
+
+private fun BsonDocument.stringValue(name: String): String? = (this[name] as? BsonString)?.value
+
+private fun BsonDocument.throwIfWriteFailed() {
+    val writeErrors = this["writeErrors"] as? BsonArray
+    if (writeErrors != null && writeErrors.values.isNotEmpty()) {
+        throw MongoWriteException(this)
+    }
+    if (this["writeConcernError"] != null) {
+        throw MongoWriteException(this)
+    }
+}
+
+private fun BsonDocument.writeFailureSummary(): String =
+    when {
+        (this["writeErrors"] as? BsonArray)?.values?.isNotEmpty() == true -> " with writeErrors"
+        this["writeConcernError"] != null -> " with writeConcernError"
+        else -> ""
+    }
+
+private fun BsonDocument.commandFailureSummary(): String {
+    val code = intValue("code")
+    val errmsg = stringValue("errmsg")
+    return when {
+        code != null && errmsg != null -> " code=$code errmsg=$errmsg"
+        code != null -> " code=$code"
+        errmsg != null -> " errmsg=$errmsg"
+        else -> ""
+    }
+}

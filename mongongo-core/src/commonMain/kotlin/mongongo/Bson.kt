@@ -1,5 +1,10 @@
 package mongongo
 
+import kotlin.concurrent.atomics.AtomicInt
+import kotlin.concurrent.atomics.ExperimentalAtomicApi
+import kotlin.random.Random
+import kotlin.time.Clock
+
 public sealed interface BsonValue
 
 public data class BsonDouble(val value: Double) : BsonValue
@@ -10,6 +15,17 @@ public data class BsonDocument(val values: Map<String, BsonValue>) : BsonValue {
     public constructor(vararg values: Pair<String, BsonValue>) : this(linkedMapOf(*values))
 
     public operator fun get(name: String): BsonValue? = values[name]
+}
+
+internal fun BsonDocument.withValue(name: String, value: BsonValue): BsonDocument {
+    val copy = linkedMapOf<String, BsonValue>()
+    copy[name] = value
+    for ((existingName, existingValue) in values) {
+        if (existingName != name) {
+            copy[existingName] = existingValue
+        }
+    }
+    return BsonDocument(copy)
 }
 
 public data class BsonArray(val values: List<BsonValue>) : BsonValue
@@ -35,6 +51,35 @@ public data class BsonObjectId(val bytes: List<Byte>) : BsonValue {
                 hex.chunked(2).map { byteHex -> byteHex.toInt(radix = 16).toByte() }
             )
         }
+
+        internal fun generate(): BsonObjectId = BsonObjectIdGenerator.generate()
+    }
+}
+
+@OptIn(ExperimentalAtomicApi::class)
+private object BsonObjectIdGenerator {
+    private const val TimestampByteCount = 4
+    private const val ProcessUniqueByteCount = 5
+    private const val CounterByteCount = 3
+    private const val CounterMask = 0x00ff_ffff
+
+    private val processUnique = List(ProcessUniqueByteCount) { Random.nextInt(0, 256).toByte() }
+    private val counter = AtomicInt(Random.nextInt())
+
+    fun generate(): BsonObjectId {
+        val timestampSeconds = Clock.System.now().epochSeconds
+        val sequence = counter.addAndFetch(1) and CounterMask
+        val bytes = mutableListOf<Byte>()
+
+        repeat(TimestampByteCount) { index ->
+            bytes.add((timestampSeconds ushr ((TimestampByteCount - 1 - index) * 8)).toByte())
+        }
+        bytes.addAll(processUnique)
+        repeat(CounterByteCount) { index ->
+            bytes.add((sequence ushr ((CounterByteCount - 1 - index) * 8)).toByte())
+        }
+
+        return BsonObjectId(bytes)
     }
 }
 

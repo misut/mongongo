@@ -2,9 +2,12 @@ package mongongo
 
 import com.mongodb.kotlin.client.MongoClient as JvmMongoClient
 import kotlinx.coroutines.test.runTest
+import kotlin.random.Random
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertIs
 import org.bson.Document
+import org.bson.types.ObjectId
 
 class EmbedMongoTest {
     private val shardedEmbedMongoCluster = ShardedEmbedMongoCluster()
@@ -25,6 +28,34 @@ class EmbedMongoTest {
             assertEquals(1.0, client.ping().ok)
         } finally {
             client.close()
+        }
+    }
+
+    @Test
+    fun insertsDocumentWithMongongoClientAndReadsItWithJvmDriver() = runTest {
+        val databaseName = "mongongo_test"
+        val collectionName = "insert_one_${Random.nextInt(0, Int.MAX_VALUE)}"
+        val client = MongoClient.connect(shardedEmbedMongoCluster.connectionString.connectionString)
+        val insertedId =
+            try {
+                val result =
+                    client
+                        .database(databaseName)
+                        .collection(collectionName)
+                        .insertOne(BsonDocument("name" to BsonString("Ada")))
+                assertIs<BsonObjectId>(result.insertedId)
+            } finally {
+                client.close()
+            }
+
+        syncClient.use { verifier ->
+            val stored =
+                verifier
+                    .getDatabase(databaseName)
+                    .getCollection<Document>(collectionName)
+                    .find(Document("_id", ObjectId(insertedId.bytes.toByteArray())))
+                    .first()
+            assertEquals("Ada", stored.getString("name"))
         }
     }
 }
