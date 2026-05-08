@@ -101,6 +101,30 @@ public class MongoClient private constructor(
         return InsertOneResult(acknowledged = true, insertedId = insertedId, raw = result.raw)
     }
 
+    internal suspend fun findOne(database: String, collection: String, filter: BsonDocument): BsonDocument? {
+        val result =
+            runCommand(
+                BsonDocument(
+                    "find" to BsonString(collection),
+                    "filter" to filter,
+                    "limit" to BsonInt32(1),
+                    "singleBatch" to BsonBoolean(true),
+                    "\$db" to BsonString(database)
+                )
+            )
+        val cursor = result.raw.documentValue("cursor")
+        val cursorId = cursor.longValue("id")
+            ?: error("MongoDB find response did not contain a numeric cursor id")
+        val firstBatch = cursor.arrayValue("firstBatch")
+        check(cursorId == 0L) { "MongoDB findOne response left cursor open id=$cursorId" }
+
+        return when (val document = firstBatch.values.firstOrNull()) {
+            null -> null
+            is BsonDocument -> document
+            else -> error("MongoDB find response firstBatch contained a non-document value")
+        }
+    }
+
     public companion object {
         public suspend fun connect(uri: String): MongoClient {
             val connectionString = MongoConnectionStringParser.parse(uri)
@@ -193,6 +217,9 @@ public class MongoCollection internal constructor(
 
     public suspend fun insertOne(document: BsonDocument): InsertOneResult =
         database.client.insertOne(database = database.name, collection = name, document = document)
+
+    public suspend fun findOne(filter: BsonDocument = BsonDocument()): BsonDocument? =
+        database.client.findOne(database = database.name, collection = name, filter = filter)
 }
 
 private fun BsonDocument.toServerDescription(): MongoServerDescription =
@@ -219,9 +246,22 @@ private fun BsonDocument.intValue(name: String): Int? =
         else -> null
     }
 
+private fun BsonDocument.longValue(name: String): Long? =
+    when (val value = this[name]) {
+        is BsonInt64 -> value.value
+        is BsonInt32 -> value.value.toLong()
+        else -> null
+    }
+
 private fun BsonDocument.booleanValue(name: String): Boolean? = (this[name] as? BsonBoolean)?.value
 
 private fun BsonDocument.stringValue(name: String): String? = (this[name] as? BsonString)?.value
+
+private fun BsonDocument.documentValue(name: String): BsonDocument =
+    this[name] as? BsonDocument ?: error("MongoDB response field $name was not a document")
+
+private fun BsonDocument.arrayValue(name: String): BsonArray =
+    this[name] as? BsonArray ?: error("MongoDB response field $name was not an array")
 
 private fun BsonDocument.throwIfWriteFailed() {
     val writeErrors = this["writeErrors"] as? BsonArray

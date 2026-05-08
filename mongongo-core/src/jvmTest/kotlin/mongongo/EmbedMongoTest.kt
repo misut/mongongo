@@ -58,4 +58,42 @@ class EmbedMongoTest {
             assertEquals("Ada", stored.getString("name"))
         }
     }
+
+    @Test
+    fun findsDocumentInsertedWithMongongoClientAndVerifiesWithJvmDriver() = runTest {
+        val databaseName = "mongongo_test"
+        val collectionName = "find_one_${Random.nextInt(0, Int.MAX_VALUE)}"
+        var insertedId: BsonObjectId? = null
+        val client = MongoClient.connect(shardedEmbedMongoCluster.connectionString.connectionString)
+        try {
+            val collection = client.database(databaseName).collection(collectionName)
+            val insertResult =
+                collection.insertOne(
+                    BsonDocument(
+                        "name" to BsonString("Ada"),
+                        "role" to BsonString("reader")
+                    )
+                )
+            val id = assertIs<BsonObjectId>(insertResult.insertedId)
+            insertedId = id
+
+            val found = collection.findOne(BsonDocument("_id" to id))
+            assertEquals(id, found?.get("_id"))
+            assertEquals(BsonString("Ada"), found?.get("name"))
+            assertEquals(BsonString("reader"), found?.get("role"))
+        } finally {
+            client.close()
+        }
+
+        syncClient.use { verifier ->
+            val stored =
+                verifier
+                    .getDatabase(databaseName)
+                    .getCollection<Document>(collectionName)
+                    .find(Document("_id", ObjectId(insertedId.bytes.toByteArray())))
+                    .first()
+            assertEquals("Ada", stored.getString("name"))
+            assertEquals("reader", stored.getString("role"))
+        }
+    }
 }

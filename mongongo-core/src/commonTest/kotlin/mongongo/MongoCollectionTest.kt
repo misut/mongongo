@@ -9,6 +9,137 @@ import kotlin.test.assertTrue
 
 class MongoCollectionTest {
     @Test
+    fun findOneSendsFindCommandAndReturnsFirstBatchDocument() = runTest {
+        val filter = BsonDocument("name" to BsonString("Ada"))
+        val found =
+            BsonDocument(
+                "_id" to BsonString("known-id"),
+                "name" to BsonString("Ada")
+            )
+
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                val find = receive()
+                assertEquals(listOf("find", "filter", "limit", "singleBatch", "\$db"), find.body.values.keys.toList())
+                assertEquals(BsonString("books"), find.body["find"])
+                assertEquals(filter, find.body["filter"])
+                assertEquals(BsonInt32(1), find.body["limit"])
+                assertEquals(BsonBoolean(true), find.body["singleBatch"])
+                assertEquals(BsonString("library"), find.body["\$db"])
+
+                reply(
+                    find,
+                    BsonDocument(
+                        "cursor" to
+                            BsonDocument(
+                                "id" to BsonInt64(0),
+                                "ns" to BsonString("library.books"),
+                                "firstBatch" to BsonArray(listOf(found))
+                            ),
+                        "ok" to BsonDouble(1.0)
+                    )
+                )
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                val result = client.database("library").collection("books").findOne(filter)
+                assertEquals(found, result)
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
+    fun findOneReturnsNullForEmptyFirstBatch() = runTest {
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                val find = receive()
+                reply(
+                    find,
+                    BsonDocument(
+                        "cursor" to
+                            BsonDocument(
+                                "id" to BsonInt64(0),
+                                "ns" to BsonString("library.books"),
+                                "firstBatch" to BsonArray(emptyList())
+                            ),
+                        "ok" to BsonDouble(1.0)
+                    )
+                )
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                assertNull(client.database("library").collection("books").findOne())
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
+    fun findOneFailsOnCommandFailure() = runTest {
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                val find = receive()
+                reply(
+                    find,
+                    BsonDocument(
+                        "ok" to BsonDouble(0.0),
+                        "code" to BsonInt32(13),
+                        "errmsg" to BsonString("not authorized")
+                    )
+                )
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                assertFailsWith<MongoCommandException> {
+                    client.database("library").collection("books").findOne()
+                }
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
+    fun findOneFailsWhenCursorRemainsOpen() = runTest {
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                val find = receive()
+                reply(
+                    find,
+                    BsonDocument(
+                        "cursor" to
+                            BsonDocument(
+                                "id" to BsonInt64(42),
+                                "ns" to BsonString("library.books"),
+                                "firstBatch" to BsonArray(emptyList())
+                            ),
+                        "ok" to BsonDouble(1.0)
+                    )
+                )
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                assertFailsWith<IllegalStateException> {
+                    client.database("library").collection("books").findOne()
+                }
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
     fun insertOneGeneratesObjectIdAndSendsInsertCommand() = runTest {
         var sentDocument: BsonDocument? = null
 
