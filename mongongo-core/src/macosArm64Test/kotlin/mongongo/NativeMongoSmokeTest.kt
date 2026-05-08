@@ -3,6 +3,7 @@ package mongongo
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.toKString
@@ -83,6 +84,34 @@ class NativeMongoSmokeTest {
     }
 
     @Test
+    fun deletesAgainstFakeOpMsgServer() = runTest {
+        val filter = BsonDocument("name" to BsonString("Ada"))
+
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                val delete = receive()
+                assertEquals(BsonString("native_books"), delete.body["delete"])
+                assertEquals(BsonBoolean(true), delete.body["ordered"])
+                assertEquals(BsonString("native_library"), delete.body["\$db"])
+                val deletes = delete.body["deletes"] as BsonArray
+                val statement = deletes.values.single() as BsonDocument
+                assertEquals(filter, statement["q"])
+                assertEquals(BsonInt32(1), statement["limit"])
+                reply(delete, BsonDocument("ok" to BsonDouble(1.0), "n" to BsonInt32(1)))
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                val result = client.database("native_library").collection("native_books").deleteOne(filter)
+                assertEquals(1L, result.deletedCount)
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
     fun pingsConfiguredMongoUri() = runTest {
         val uri = environment("MONGONGO_TEST_URI") ?: return@runTest
         val client = MongoClient.connect(uri)
@@ -124,6 +153,25 @@ class NativeMongoSmokeTest {
             val found = collection.findOne(BsonDocument("_id" to insertedId))
             assertEquals(insertedId, found?.get("_id"))
             assertEquals(BsonString("native"), found?.get("name"))
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun insertsDeletesAndFindsConfiguredMongoUri() = runTest {
+        val uri = environment("MONGONGO_TEST_URI") ?: return@runTest
+        val client = MongoClient.connect(uri)
+        try {
+            val collection =
+                client
+                    .database("mongongo_native_smoke")
+                    .collection("delete_one_${Random.nextInt(0, Int.MAX_VALUE)}")
+            val insertResult = collection.insertOne(BsonDocument("name" to BsonString("native")))
+            val insertedId = assertIs<BsonObjectId>(insertResult.insertedId)
+            val deleteResult = collection.deleteOne(BsonDocument("_id" to insertedId))
+            assertEquals(1L, deleteResult.deletedCount)
+            assertNull(collection.findOne(BsonDocument("_id" to insertedId)))
         } finally {
             client.close()
         }

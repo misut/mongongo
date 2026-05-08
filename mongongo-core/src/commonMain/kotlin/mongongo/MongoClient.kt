@@ -17,6 +17,12 @@ public data class InsertOneResult(
     val raw: BsonDocument
 )
 
+public data class DeleteResult(
+    val acknowledged: Boolean,
+    val deletedCount: Long,
+    val raw: BsonDocument
+)
+
 public data class MongoServerDescription(
     val maxWireVersion: Int?,
     val maxMessageSizeBytes: Int?,
@@ -99,6 +105,32 @@ public class MongoClient private constructor(
 
         result.raw.throwIfWriteFailed()
         return InsertOneResult(acknowledged = true, insertedId = insertedId, raw = result.raw)
+    }
+
+    internal suspend fun deleteOne(database: String, collection: String, filter: BsonDocument): DeleteResult {
+        val result =
+            runCommand(
+                BsonDocument(
+                    "delete" to BsonString(collection),
+                    "deletes" to
+                        BsonArray(
+                            listOf(
+                                BsonDocument(
+                                    "q" to filter,
+                                    "limit" to BsonInt32(1)
+                                )
+                            )
+                        ),
+                    "ordered" to BsonBoolean(true),
+                    "\$db" to BsonString(database)
+                )
+            )
+
+        result.raw.throwIfWriteFailed()
+        val deletedCount =
+            result.raw.longValue("n")
+                ?: error("MongoDB delete response did not contain numeric n")
+        return DeleteResult(acknowledged = true, deletedCount = deletedCount, raw = result.raw)
     }
 
     internal suspend fun findOne(database: String, collection: String, filter: BsonDocument): BsonDocument? {
@@ -217,6 +249,9 @@ public class MongoCollection internal constructor(
 
     public suspend fun insertOne(document: BsonDocument): InsertOneResult =
         database.client.insertOne(database = database.name, collection = name, document = document)
+
+    public suspend fun deleteOne(filter: BsonDocument): DeleteResult =
+        database.client.deleteOne(database = database.name, collection = name, filter = filter)
 
     public suspend fun findOne(filter: BsonDocument = BsonDocument()): BsonDocument? =
         database.client.findOne(database = database.name, collection = name, filter = filter)

@@ -268,6 +268,163 @@ class MongoCollectionTest {
             }
         }
     }
+
+    @Test
+    fun deleteOneSendsDeleteCommandAndReturnsDeletedCount() = runTest {
+        val filter = BsonDocument("name" to BsonString("Ada"))
+
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                val delete = receive()
+                assertEquals(listOf("delete", "deletes", "ordered", "\$db"), delete.body.values.keys.toList())
+                assertEquals(BsonString("books"), delete.body["delete"])
+                assertEquals(BsonBoolean(true), delete.body["ordered"])
+                assertEquals(BsonString("library"), delete.body["\$db"])
+
+                val deletes = delete.body["deletes"].asBson<BsonArray>()
+                assertEquals(1, deletes.values.size)
+                val statement = deletes.values.single().asBson<BsonDocument>()
+                assertEquals(listOf("q", "limit"), statement.values.keys.toList())
+                assertEquals(filter, statement["q"])
+                assertEquals(BsonInt32(1), statement["limit"])
+
+                reply(delete, BsonDocument("ok" to BsonDouble(1.0), "n" to BsonInt32(1)))
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                val result = client.database("library").collection("books").deleteOne(filter)
+                assertTrue(result.acknowledged)
+                assertEquals(1L, result.deletedCount)
+                assertEquals(BsonInt32(1), result.raw["n"])
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
+    fun deleteOneReturnsZeroDeletedCountAndAllowsEmptyFilter() = runTest {
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                val delete = receive()
+                val statement =
+                    delete
+                        .body["deletes"]
+                        .asBson<BsonArray>()
+                        .values
+                        .single()
+                        .asBson<BsonDocument>()
+                assertEquals(BsonDocument(), statement["q"])
+                assertEquals(BsonInt32(1), statement["limit"])
+                reply(delete, BsonDocument("ok" to BsonDouble(1.0), "n" to BsonInt32(0)))
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                val result = client.database("library").collection("books").deleteOne(BsonDocument())
+                assertEquals(0L, result.deletedCount)
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
+    fun deleteOneFailsOnCommandFailure() = runTest {
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                val delete = receive()
+                reply(
+                    delete,
+                    BsonDocument(
+                        "ok" to BsonDouble(0.0),
+                        "code" to BsonInt32(13),
+                        "errmsg" to BsonString("not authorized")
+                    )
+                )
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                assertFailsWith<MongoCommandException> {
+                    client.database("library").collection("books").deleteOne(BsonDocument())
+                }
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
+    fun deleteOneFailsOnWriteErrors() = runTest {
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                val delete = receive()
+                reply(
+                    delete,
+                    BsonDocument(
+                        "ok" to BsonDouble(1.0),
+                        "n" to BsonInt32(0),
+                        "writeErrors" to
+                            BsonArray(
+                                listOf(
+                                    BsonDocument(
+                                        "index" to BsonInt32(0),
+                                        "code" to BsonInt32(2),
+                                        "errmsg" to BsonString("bad query")
+                                    )
+                                )
+                            )
+                    )
+                )
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                assertFailsWith<MongoWriteException> {
+                    client.database("library").collection("books").deleteOne(BsonDocument())
+                }
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
+    fun deleteOneFailsOnWriteConcernError() = runTest {
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                val delete = receive()
+                reply(
+                    delete,
+                    BsonDocument(
+                        "ok" to BsonDouble(1.0),
+                        "n" to BsonInt32(1),
+                        "writeConcernError" to
+                            BsonDocument(
+                                "code" to BsonInt32(64),
+                                "errmsg" to BsonString("write concern failed")
+                            )
+                    )
+                )
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                assertFailsWith<MongoWriteException> {
+                    client.database("library").collection("books").deleteOne(BsonDocument())
+                }
+            } finally {
+                client.close()
+            }
+        }
+    }
 }
 
 private inline fun <reified T : BsonValue> BsonValue?.asBson(): T =

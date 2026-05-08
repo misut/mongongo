@@ -6,6 +6,7 @@ import kotlin.random.Random
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
+import kotlin.test.assertNull
 import org.bson.Document
 import org.bson.types.ObjectId
 
@@ -94,6 +95,35 @@ class EmbedMongoTest {
                     .first()
             assertEquals("Ada", stored.getString("name"))
             assertEquals("reader", stored.getString("role"))
+        }
+    }
+
+    @Test
+    fun deletesDocumentWithMongongoClientAndVerifiesWithJvmDriver() = runTest {
+        val databaseName = "mongongo_test"
+        val collectionName = "delete_one_${Random.nextInt(0, Int.MAX_VALUE)}"
+        var insertedId: BsonObjectId? = null
+        val client = MongoClient.connect(shardedEmbedMongoCluster.connectionString.connectionString)
+        try {
+            val collection = client.database(databaseName).collection(collectionName)
+            val insertResult = collection.insertOne(BsonDocument("name" to BsonString("Ada")))
+            val id = assertIs<BsonObjectId>(insertResult.insertedId)
+            insertedId = id
+
+            val deleteResult = collection.deleteOne(BsonDocument("_id" to id))
+            assertEquals(1L, deleteResult.deletedCount)
+            assertNull(collection.findOne(BsonDocument("_id" to id)))
+        } finally {
+            client.close()
+        }
+
+        syncClient.use { verifier ->
+            val remaining =
+                verifier
+                    .getDatabase(databaseName)
+                    .getCollection<Document>(collectionName)
+                    .countDocuments(Document("_id", ObjectId(insertedId.bytes.toByteArray())))
+            assertEquals(0L, remaining)
         }
     }
 }
