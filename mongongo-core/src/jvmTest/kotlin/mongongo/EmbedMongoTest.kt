@@ -126,4 +126,87 @@ class EmbedMongoTest {
             assertEquals(0L, remaining)
         }
     }
+
+    @Test
+    fun updatesDocumentWithMongongoClientAndVerifiesWithJvmDriver() = runTest {
+        val databaseName = "mongongo_test"
+        val collectionName = "update_one_${Random.nextInt(0, Int.MAX_VALUE)}"
+        var insertedId: BsonObjectId? = null
+        val client = MongoClient.connect(shardedEmbedMongoCluster.connectionString.connectionString)
+        try {
+            val collection = client.database(databaseName).collection(collectionName)
+            val insertResult =
+                collection.insertOne(
+                    BsonDocument(
+                        "name" to BsonString("Ada"),
+                        "role" to BsonString("reader")
+                    )
+                )
+            val id = assertIs<BsonObjectId>(insertResult.insertedId)
+            insertedId = id
+
+            val updateResult =
+                collection.updateOne(
+                    filter = BsonDocument("_id" to id),
+                    update = BsonDocument("\$set" to BsonDocument("role" to BsonString("writer")))
+                )
+            assertEquals(1L, updateResult.matchedCount)
+            assertEquals(1L, updateResult.modifiedCount)
+
+            val found = collection.findOne(BsonDocument("_id" to id))
+            assertEquals(BsonString("Ada"), found?.get("name"))
+            assertEquals(BsonString("writer"), found?.get("role"))
+        } finally {
+            client.close()
+        }
+
+        syncClient.use { verifier ->
+            val stored =
+                verifier
+                    .getDatabase(databaseName)
+                    .getCollection<Document>(collectionName)
+                    .find(Document("_id", ObjectId(insertedId.bytes.toByteArray())))
+                    .first()
+            assertEquals("Ada", stored.getString("name"))
+            assertEquals("writer", stored.getString("role"))
+        }
+    }
+
+    @Test
+    fun upsertsDocumentWithMongongoClientAndVerifiesWithJvmDriver() = runTest {
+        val databaseName = "mongongo_test"
+        val collectionName = "update_one_upsert_${Random.nextInt(0, Int.MAX_VALUE)}"
+        var upsertedId: BsonObjectId? = null
+        val client = MongoClient.connect(shardedEmbedMongoCluster.connectionString.connectionString)
+        try {
+            val collection = client.database(databaseName).collection(collectionName)
+            val updateResult =
+                collection.updateOne(
+                    filter = BsonDocument("name" to BsonString("Grace")),
+                    update = BsonDocument("\$set" to BsonDocument("role" to BsonString("admin"))),
+                    upsert = true
+                )
+            val id = assertIs<BsonObjectId>(updateResult.upsertedId)
+            upsertedId = id
+            assertEquals(1L, updateResult.matchedCount)
+            assertEquals(0L, updateResult.modifiedCount)
+
+            val found = collection.findOne(BsonDocument("_id" to id))
+            assertEquals(BsonString("Grace"), found?.get("name"))
+            assertEquals(BsonString("admin"), found?.get("role"))
+        } finally {
+            client.close()
+        }
+
+        syncClient.use { verifier ->
+            val stored =
+                verifier
+                    .getDatabase(databaseName)
+                    .getCollection<Document>(collectionName)
+                    .find(Document("_id", ObjectId(upsertedId.bytes.toByteArray())))
+                    .first()
+            assertEquals("Grace", stored.getString("name"))
+            assertEquals("admin", stored.getString("role"))
+        }
+    }
 }

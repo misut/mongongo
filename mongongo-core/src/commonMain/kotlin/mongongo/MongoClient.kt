@@ -23,6 +23,14 @@ public data class DeleteResult(
     val raw: BsonDocument
 )
 
+public data class UpdateResult(
+    val acknowledged: Boolean,
+    val matchedCount: Long,
+    val modifiedCount: Long,
+    val upsertedId: BsonValue?,
+    val raw: BsonDocument
+)
+
 public data class MongoServerDescription(
     val maxWireVersion: Int?,
     val maxMessageSizeBytes: Int?,
@@ -131,6 +139,50 @@ public class MongoClient private constructor(
             result.raw.longValue("n")
                 ?: error("MongoDB delete response did not contain numeric n")
         return DeleteResult(acknowledged = true, deletedCount = deletedCount, raw = result.raw)
+    }
+
+    internal suspend fun updateOne(
+        database: String,
+        collection: String,
+        filter: BsonDocument,
+        update: BsonDocument,
+        upsert: Boolean
+    ): UpdateResult {
+        requireUpdateOperatorDocument(update)
+        val result =
+            runCommand(
+                BsonDocument(
+                    "update" to BsonString(collection),
+                    "updates" to
+                        BsonArray(
+                            listOf(
+                                BsonDocument(
+                                    "q" to filter,
+                                    "u" to update,
+                                    "multi" to BsonBoolean(false),
+                                    "upsert" to BsonBoolean(upsert)
+                                )
+                            )
+                        ),
+                    "ordered" to BsonBoolean(true),
+                    "\$db" to BsonString(database)
+                )
+            )
+
+        result.raw.throwIfWriteFailed()
+        val matchedCount =
+            result.raw.longValue("n")
+                ?: error("MongoDB update response did not contain numeric n")
+        val modifiedCount =
+            result.raw.longValue("nModified")
+                ?: error("MongoDB update response did not contain numeric nModified")
+        return UpdateResult(
+            acknowledged = true,
+            matchedCount = matchedCount,
+            modifiedCount = modifiedCount,
+            upsertedId = result.raw.firstUpsertedId(),
+            raw = result.raw
+        )
     }
 
     internal suspend fun findOne(database: String, collection: String, filter: BsonDocument): BsonDocument? {
@@ -253,6 +305,19 @@ public class MongoCollection internal constructor(
     public suspend fun deleteOne(filter: BsonDocument): DeleteResult =
         database.client.deleteOne(database = database.name, collection = name, filter = filter)
 
+    public suspend fun updateOne(
+        filter: BsonDocument,
+        update: BsonDocument,
+        upsert: Boolean = false
+    ): UpdateResult =
+        database.client.updateOne(
+            database = database.name,
+            collection = name,
+            filter = filter,
+            update = update,
+            upsert = upsert
+        )
+
     public suspend fun findOne(filter: BsonDocument = BsonDocument()): BsonDocument? =
         database.client.findOne(database = database.name, collection = name, filter = filter)
 }
@@ -297,6 +362,20 @@ private fun BsonDocument.documentValue(name: String): BsonDocument =
 
 private fun BsonDocument.arrayValue(name: String): BsonArray =
     this[name] as? BsonArray ?: error("MongoDB response field $name was not an array")
+
+private fun requireUpdateOperatorDocument(update: BsonDocument) {
+    val firstField = update.values.keys.firstOrNull()
+    require(firstField != null && firstField.startsWith("\$")) {
+        "updateOne only supports update operator documents"
+    }
+}
+
+private fun BsonDocument.firstUpsertedId(): BsonValue? {
+    val upserted = this["upserted"] as? BsonArray ?: return null
+    val first = upserted.values.firstOrNull() ?: return null
+    val document = first as? BsonDocument ?: error("MongoDB update response upserted entry was not a document")
+    return document["_id"]
+}
 
 private fun BsonDocument.throwIfWriteFailed() {
     val writeErrors = this["writeErrors"] as? BsonArray
