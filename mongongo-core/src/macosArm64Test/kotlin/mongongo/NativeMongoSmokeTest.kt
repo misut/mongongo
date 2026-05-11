@@ -112,6 +112,49 @@ class NativeMongoSmokeTest {
     }
 
     @Test
+    fun updatesAgainstFakeOpMsgServer() = runTest {
+        val filter = BsonDocument("name" to BsonString("Ada"))
+        val update = BsonDocument("\$set" to BsonDocument("role" to BsonString("writer")))
+
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                val updateCommand = receive()
+                assertEquals(BsonString("native_books"), updateCommand.body["update"])
+                assertEquals(BsonBoolean(true), updateCommand.body["ordered"])
+                assertEquals(BsonString("native_library"), updateCommand.body["\$db"])
+                val updates = updateCommand.body["updates"] as BsonArray
+                val statement = updates.values.single() as BsonDocument
+                assertEquals(filter, statement["q"])
+                assertEquals(update, statement["u"])
+                assertEquals(BsonBoolean(false), statement["multi"])
+                assertEquals(BsonBoolean(false), statement["upsert"])
+                reply(
+                    updateCommand,
+                    BsonDocument(
+                        "ok" to BsonDouble(1.0),
+                        "n" to BsonInt32(1),
+                        "nModified" to BsonInt32(1)
+                    )
+                )
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                val result =
+                    client
+                        .database("native_library")
+                        .collection("native_books")
+                        .updateOne(filter = filter, update = update)
+                assertEquals(1L, result.matchedCount)
+                assertEquals(1L, result.modifiedCount)
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
     fun pingsConfiguredMongoUri() = runTest {
         val uri = environment("MONGONGO_TEST_URI") ?: return@runTest
         val client = MongoClient.connect(uri)
@@ -153,6 +196,37 @@ class NativeMongoSmokeTest {
             val found = collection.findOne(BsonDocument("_id" to insertedId))
             assertEquals(insertedId, found?.get("_id"))
             assertEquals(BsonString("native"), found?.get("name"))
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun insertsUpdatesAndFindsConfiguredMongoUri() = runTest {
+        val uri = environment("MONGONGO_TEST_URI") ?: return@runTest
+        val client = MongoClient.connect(uri)
+        try {
+            val collection =
+                client
+                    .database("mongongo_native_smoke")
+                    .collection("update_one_${Random.nextInt(0, Int.MAX_VALUE)}")
+            val insertResult =
+                collection.insertOne(
+                    BsonDocument(
+                        "name" to BsonString("native"),
+                        "role" to BsonString("reader")
+                    )
+                )
+            val insertedId = assertIs<BsonObjectId>(insertResult.insertedId)
+            val updateResult =
+                collection.updateOne(
+                    filter = BsonDocument("_id" to insertedId),
+                    update = BsonDocument("\$set" to BsonDocument("role" to BsonString("writer")))
+                )
+            assertEquals(1L, updateResult.matchedCount)
+            assertEquals(1L, updateResult.modifiedCount)
+            val found = collection.findOne(BsonDocument("_id" to insertedId))
+            assertEquals(BsonString("writer"), found?.get("role"))
         } finally {
             client.close()
         }
