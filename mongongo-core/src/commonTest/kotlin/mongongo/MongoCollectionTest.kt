@@ -140,6 +140,209 @@ class MongoCollectionTest {
     }
 
     @Test
+    fun findSendsFindCommandWithOptions() = runTest {
+        val filter = BsonDocument("role" to BsonString("writer"))
+
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                val find = receive()
+                assertEquals(listOf("find", "filter", "limit", "batchSize", "\$db"), find.body.values.keys.toList())
+                assertEquals(BsonString("books"), find.body["find"])
+                assertEquals(filter, find.body["filter"])
+                assertEquals(BsonInt32(7), find.body["limit"])
+                assertEquals(BsonInt32(2), find.body["batchSize"])
+                assertEquals(BsonString("library"), find.body["\$db"])
+                reply(
+                    find,
+                    BsonDocument(
+                        "cursor" to
+                            BsonDocument(
+                                "id" to BsonInt64(0),
+                                "ns" to BsonString("library.books"),
+                                "firstBatch" to BsonArray(emptyList())
+                            ),
+                        "ok" to BsonDouble(1.0)
+                    )
+                )
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                val result =
+                    client
+                        .database("library")
+                        .collection("books")
+                        .find(filter = filter, limit = 7, batchSize = 2)
+                        .toList()
+                assertEquals(emptyList(), result)
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
+    fun findReturnsAllFirstBatchDocumentsWhenCursorIsClosed() = runTest {
+        val first = BsonDocument("_id" to BsonString("first"), "name" to BsonString("Ada"))
+        val second = BsonDocument("_id" to BsonString("second"), "name" to BsonString("Grace"))
+
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                val find = receive()
+                assertEquals(listOf("find", "filter", "\$db"), find.body.values.keys.toList())
+                reply(
+                    find,
+                    BsonDocument(
+                        "cursor" to
+                            BsonDocument(
+                                "id" to BsonInt64(0),
+                                "ns" to BsonString("library.books"),
+                                "firstBatch" to BsonArray(listOf(first, second))
+                            ),
+                        "ok" to BsonDouble(1.0)
+                    )
+                )
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                val result = client.database("library").collection("books").find().toList()
+                assertEquals(listOf(first, second), result)
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
+    fun findUsesGetMoreWhenCursorRemainsOpen() = runTest {
+        val first = BsonDocument("_id" to BsonString("first"), "name" to BsonString("Ada"))
+        val second = BsonDocument("_id" to BsonString("second"), "name" to BsonString("Grace"))
+
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                val find = receive()
+                reply(
+                    find,
+                    BsonDocument(
+                        "cursor" to
+                            BsonDocument(
+                                "id" to BsonInt64(123),
+                                "ns" to BsonString("library.books"),
+                                "firstBatch" to BsonArray(listOf(first))
+                            ),
+                        "ok" to BsonDouble(1.0)
+                    )
+                )
+
+                val getMore = receive()
+                assertEquals(listOf("getMore", "collection", "\$db"), getMore.body.values.keys.toList())
+                assertEquals(BsonInt64(123), getMore.body["getMore"])
+                assertEquals(BsonString("books"), getMore.body["collection"])
+                assertEquals(BsonString("library"), getMore.body["\$db"])
+                reply(
+                    getMore,
+                    BsonDocument(
+                        "cursor" to
+                            BsonDocument(
+                                "id" to BsonInt64(0),
+                                "ns" to BsonString("library.books"),
+                                "nextBatch" to BsonArray(listOf(second))
+                            ),
+                        "ok" to BsonDouble(1.0)
+                    )
+                )
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                val result = client.database("library").collection("books").find().toList()
+                assertEquals(listOf(first, second), result)
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
+    fun findCloseKillsOpenCursor() = runTest {
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                val find = receive()
+                reply(
+                    find,
+                    BsonDocument(
+                        "cursor" to
+                            BsonDocument(
+                                "id" to BsonInt64(456),
+                                "ns" to BsonString("library.books"),
+                                "firstBatch" to BsonArray(emptyList())
+                            ),
+                        "ok" to BsonDouble(1.0)
+                    )
+                )
+
+                val killCursors = receive()
+                assertEquals(listOf("killCursors", "cursors", "\$db"), killCursors.body.values.keys.toList())
+                assertEquals(BsonString("books"), killCursors.body["killCursors"])
+                assertEquals(BsonArray(listOf(BsonInt64(456))), killCursors.body["cursors"])
+                assertEquals(BsonString("library"), killCursors.body["\$db"])
+                reply(
+                    killCursors,
+                    BsonDocument(
+                        "cursorsKilled" to BsonArray(listOf(BsonInt64(456))),
+                        "cursorsNotFound" to BsonArray(emptyList()),
+                        "cursorsAlive" to BsonArray(emptyList()),
+                        "cursorsUnknown" to BsonArray(emptyList()),
+                        "ok" to BsonDouble(1.0)
+                    )
+                )
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                val cursor = client.database("library").collection("books").find()
+                cursor.close()
+                cursor.close()
+                assertNull(cursor.next())
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
+    fun findFailsOnCommandFailure() = runTest {
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                val find = receive()
+                reply(
+                    find,
+                    BsonDocument(
+                        "ok" to BsonDouble(0.0),
+                        "code" to BsonInt32(13),
+                        "errmsg" to BsonString("not authorized")
+                    )
+                )
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                assertFailsWith<MongoCommandException> {
+                    client.database("library").collection("books").find()
+                }
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
     fun insertOneGeneratesObjectIdAndSendsInsertCommand() = runTest {
         var sentDocument: BsonDocument? = null
 

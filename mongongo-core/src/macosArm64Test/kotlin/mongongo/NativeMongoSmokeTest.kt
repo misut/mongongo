@@ -55,6 +55,66 @@ class NativeMongoSmokeTest {
     }
 
     @Test
+    fun findsManyAgainstFakeOpMsgServer() = runTest {
+        val filter = BsonDocument("kind" to BsonString("language"))
+        val first = BsonDocument("_id" to BsonString("native-first"), "name" to BsonString("Kotlin"))
+        val second = BsonDocument("_id" to BsonString("native-second"), "name" to BsonString("Swift"))
+
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                val find = receive()
+                assertEquals(BsonString("native_books"), find.body["find"])
+                assertEquals(filter, find.body["filter"])
+                assertEquals(BsonInt32(1), find.body["batchSize"])
+                assertEquals(BsonString("native_library"), find.body["\$db"])
+                reply(
+                    find,
+                    BsonDocument(
+                        "cursor" to
+                            BsonDocument(
+                                "id" to BsonInt64(321),
+                                "ns" to BsonString("native_library.native_books"),
+                                "firstBatch" to BsonArray(listOf(first))
+                            ),
+                        "ok" to BsonDouble(1.0)
+                    )
+                )
+
+                val getMore = receive()
+                assertEquals(BsonInt64(321), getMore.body["getMore"])
+                assertEquals(BsonString("native_books"), getMore.body["collection"])
+                assertEquals(BsonString("native_library"), getMore.body["\$db"])
+                reply(
+                    getMore,
+                    BsonDocument(
+                        "cursor" to
+                            BsonDocument(
+                                "id" to BsonInt64(0),
+                                "ns" to BsonString("native_library.native_books"),
+                                "nextBatch" to BsonArray(listOf(second))
+                            ),
+                        "ok" to BsonDouble(1.0)
+                    )
+                )
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                val result =
+                    client
+                        .database("native_library")
+                        .collection("native_books")
+                        .find(filter = filter, batchSize = 1)
+                        .toList()
+                assertEquals(listOf(first, second), result)
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
     fun insertsAgainstFakeOpMsgServer() = runTest {
         withFakeMongoServer(
             handler = {
@@ -202,6 +262,27 @@ class NativeMongoSmokeTest {
     }
 
     @Test
+    fun insertsAndFindsManyConfiguredMongoUri() = runTest {
+        val uri = environment("MONGONGO_TEST_URI") ?: return@runTest
+        val expectedNames = setOf("native-a", "native-b", "native-c")
+        val client = MongoClient.connect(uri)
+        try {
+            val collection =
+                client
+                    .database("mongongo_native_smoke")
+                    .collection("find_many_${Random.nextInt(0, Int.MAX_VALUE)}")
+            for (name in expectedNames) {
+                collection.insertOne(BsonDocument("name" to BsonString(name)))
+            }
+
+            val found = collection.find().toList()
+            assertEquals(expectedNames, found.map { it.stringValue("name") }.toSet())
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
     fun insertsUpdatesAndFindsConfiguredMongoUri() = runTest {
         val uri = environment("MONGONGO_TEST_URI") ?: return@runTest
         val client = MongoClient.connect(uri)
@@ -254,3 +335,6 @@ class NativeMongoSmokeTest {
 
 @OptIn(ExperimentalForeignApi::class)
 private fun environment(name: String): String? = getenv(name)?.toKString()
+
+private fun BsonDocument.stringValue(name: String): String =
+    (this[name] as? BsonString)?.value ?: error("Expected BSON string field $name")
