@@ -173,6 +173,55 @@ class EmbedMongoTest {
     }
 
     @Test
+    fun findsDocumentsInsertedWithMongongoClientAndVerifiesWithJvmDriver() = runTest {
+        val databaseName = "mongongo_test"
+        val collectionName = "find_many_${Random.nextInt(0, Int.MAX_VALUE)}"
+        val expectedNames = setOf("Ada", "Grace", "Linus")
+        val client = MongoClient.connect(shardedEmbedMongoCluster.connectionString.connectionString)
+        try {
+            val collection = client.database(databaseName).collection(collectionName)
+            for (name in expectedNames) {
+                collection.insertOne(BsonDocument("name" to BsonString(name)))
+            }
+
+            val found = collection.find().toList()
+            assertEquals(expectedNames, found.map { it.stringValue("name") }.toSet())
+        } finally {
+            client.close()
+        }
+
+        syncClient.use { verifier ->
+            val collection = verifier.getDatabase(databaseName).getCollection<Document>(collectionName)
+            assertEquals(3L, collection.countDocuments(Document()))
+            assertEquals(expectedNames, collection.find().toList().map { it.getString("name") }.toSet())
+        }
+    }
+
+    @Test
+    fun findHonorsLimitAgainstEmbeddedMongo() = runTest {
+        val databaseName = "mongongo_test"
+        val collectionName = "find_many_limit_${Random.nextInt(0, Int.MAX_VALUE)}"
+        val client = MongoClient.connect(shardedEmbedMongoCluster.connectionString.connectionString)
+        try {
+            val collection = client.database(databaseName).collection(collectionName)
+            collection.insertOne(BsonDocument("name" to BsonString("Ada")))
+            collection.insertOne(BsonDocument("name" to BsonString("Grace")))
+            collection.insertOne(BsonDocument("name" to BsonString("Linus")))
+
+            val found = collection.find(limit = 2).toList()
+            assertEquals(2, found.size)
+        } finally {
+            client.close()
+        }
+
+        syncClient.use { verifier ->
+            val collection = verifier.getDatabase(databaseName).getCollection<Document>(collectionName)
+            assertEquals(3L, collection.countDocuments(Document()))
+            assertEquals(2, collection.find().limit(2).toList().size)
+        }
+    }
+
+    @Test
     fun upsertsDocumentWithMongongoClientAndVerifiesWithJvmDriver() = runTest {
         val databaseName = "mongongo_test"
         val collectionName = "update_one_upsert_${Random.nextInt(0, Int.MAX_VALUE)}"
@@ -209,4 +258,7 @@ class EmbedMongoTest {
             assertEquals("admin", stored.getString("role"))
         }
     }
+
+    private fun BsonDocument.stringValue(name: String): String =
+        (this[name] as? BsonString)?.value ?: error("Expected BSON string field $name")
 }

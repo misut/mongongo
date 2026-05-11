@@ -38,6 +38,11 @@ public data class MongoServerDescription(
     val isWritablePrimary: Boolean
 )
 
+internal data class MongoCursorBatch(
+    val id: Long,
+    val documents: List<BsonDocument>
+)
+
 public class MongoCommandException(
     public val result: BsonDocument
 ) : RuntimeException("MongoDB command failed with ok=${result.okValue()}${result.commandFailureSummary()}")
@@ -185,6 +190,60 @@ public class MongoClient private constructor(
         )
     }
 
+    internal suspend fun find(
+        database: String,
+        collection: String,
+        filter: BsonDocument,
+        limit: Int,
+        batchSize: Int?
+    ): MongoCursor {
+        require(limit >= 0) { "MongoDB find limit cannot be negative" }
+        require(batchSize == null || batchSize >= 0) { "MongoDB find batchSize cannot be negative" }
+
+        val command = linkedMapOf<String, BsonValue>()
+        command["find"] = BsonString(collection)
+        command["filter"] = filter
+        if (limit > 0) {
+            command["limit"] = BsonInt32(limit)
+        }
+        if (batchSize != null) {
+            command["batchSize"] = BsonInt32(batchSize)
+        }
+        command["\$db"] = BsonString(database)
+
+        val result = runCommand(BsonDocument(command))
+        val batch = result.raw.cursorBatch("firstBatch")
+        return MongoCursor(
+            client = this,
+            database = database,
+            collection = collection,
+            initialCursorId = batch.id,
+            initialBatch = batch.documents
+        )
+    }
+
+    internal suspend fun getMore(database: String, collection: String, cursorId: Long): MongoCursorBatch {
+        val result =
+            runCommand(
+                BsonDocument(
+                    "getMore" to BsonInt64(cursorId),
+                    "collection" to BsonString(collection),
+                    "\$db" to BsonString(database)
+                )
+            )
+        return result.raw.cursorBatch("nextBatch")
+    }
+
+    internal suspend fun killCursors(database: String, collection: String, cursorId: Long) {
+        runCommand(
+            BsonDocument(
+                "killCursors" to BsonString(collection),
+                "cursors" to BsonArray(listOf(BsonInt64(cursorId))),
+                "\$db" to BsonString(database)
+            )
+        )
+    }
+
     internal suspend fun findOne(database: String, collection: String, filter: BsonDocument): BsonDocument? {
         val result =
             runCommand(
@@ -277,6 +336,62 @@ public class MongoClient private constructor(
     }
 }
 
+public class MongoCursor internal constructor(
+    private val client: MongoClient,
+    private val database: String,
+    private val collection: String,
+    initialCursorId: Long,
+    initialBatch: List<BsonDocument>
+) {
+    private var cursorId = initialCursorId
+    private val batch = ArrayDeque(initialBatch)
+    private var closed = false
+
+    public suspend fun next(): BsonDocument? {
+        if (closed) {
+            return null
+        }
+
+        while (true) {
+            if (batch.isNotEmpty()) {
+                return batch.removeFirst()
+            }
+
+            if (cursorId == 0L) {
+                closed = true
+                return null
+            }
+
+            val nextBatch = client.getMore(database = database, collection = collection, cursorId = cursorId)
+            cursorId = nextBatch.id
+            batch.addAll(nextBatch.documents)
+        }
+    }
+
+    public suspend fun toList(): List<BsonDocument> {
+        val documents = mutableListOf<BsonDocument>()
+        while (true) {
+            val document = next() ?: break
+            documents.add(document)
+        }
+        return documents
+    }
+
+    public suspend fun close() {
+        if (closed) {
+            return
+        }
+
+        closed = true
+        val id = cursorId
+        cursorId = 0L
+        batch.clear()
+        if (id != 0L) {
+            client.killCursors(database = database, collection = collection, cursorId = id)
+        }
+    }
+}
+
 public class MongoDatabase internal constructor(
     internal val client: MongoClient,
     public val name: String
@@ -320,6 +435,19 @@ public class MongoCollection internal constructor(
 
     public suspend fun findOne(filter: BsonDocument = BsonDocument()): BsonDocument? =
         database.client.findOne(database = database.name, collection = name, filter = filter)
+
+    public suspend fun find(
+        filter: BsonDocument = BsonDocument(),
+        limit: Int = 0,
+        batchSize: Int? = null
+    ): MongoCursor =
+        database.client.find(
+            database = database.name,
+            collection = name,
+            filter = filter,
+            limit = limit,
+            batchSize = batchSize
+        )
 }
 
 private fun BsonDocument.toServerDescription(): MongoServerDescription =
@@ -362,6 +490,19 @@ private fun BsonDocument.documentValue(name: String): BsonDocument =
 
 private fun BsonDocument.arrayValue(name: String): BsonArray =
     this[name] as? BsonArray ?: error("MongoDB response field $name was not an array")
+
+private fun BsonDocument.cursorBatch(batchName: String): MongoCursorBatch {
+    val cursor = documentValue("cursor")
+    val cursorId =
+        cursor.longValue("id")
+            ?: error("MongoDB cursor response did not contain a numeric cursor id")
+    val batch = cursor.arrayValue(batchName)
+    val documents =
+        batch.values.map { value ->
+            value as? BsonDocument ?: error("MongoDB cursor response $batchName contained a non-document value")
+        }
+    return MongoCursorBatch(id = cursorId, documents = documents)
+}
 
 private fun requireUpdateOperatorDocument(update: BsonDocument) {
     val firstField = update.values.keys.firstOrNull()
