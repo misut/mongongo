@@ -154,6 +154,39 @@ public class MongoClient private constructor(
         upsert: Boolean
     ): UpdateResult {
         requireUpdateOperatorDocument(update)
+        return runSingleUpdate(
+            database = database,
+            collection = collection,
+            filter = filter,
+            update = update,
+            upsert = upsert
+        )
+    }
+
+    internal suspend fun replaceOne(
+        database: String,
+        collection: String,
+        filter: BsonDocument,
+        replacement: BsonDocument,
+        upsert: Boolean
+    ): UpdateResult {
+        requireReplacementDocument(replacement)
+        return runSingleUpdate(
+            database = database,
+            collection = collection,
+            filter = filter,
+            update = replacement,
+            upsert = upsert
+        )
+    }
+
+    private suspend fun runSingleUpdate(
+        database: String,
+        collection: String,
+        filter: BsonDocument,
+        update: BsonDocument,
+        upsert: Boolean
+    ): UpdateResult {
         val result =
             runCommand(
                 BsonDocument(
@@ -433,6 +466,19 @@ public class MongoCollection internal constructor(
             upsert = upsert
         )
 
+    public suspend fun replaceOne(
+        filter: BsonDocument,
+        replacement: BsonDocument,
+        upsert: Boolean = false
+    ): UpdateResult =
+        database.client.replaceOne(
+            database = database.name,
+            collection = name,
+            filter = filter,
+            replacement = replacement,
+            upsert = upsert
+        )
+
     public suspend fun findOne(filter: BsonDocument = BsonDocument()): BsonDocument? =
         database.client.findOne(database = database.name, collection = name, filter = filter)
 
@@ -494,6 +540,13 @@ private fun requireUpdateOperatorDocument(update: BsonDocument) {
     val firstField = update.values.keys.firstOrNull()
     require(firstField != null && firstField.startsWith("\$")) {
         "updateOne only supports update operator documents"
+    }
+}
+
+private fun requireReplacementDocument(replacement: BsonDocument) {
+    val firstField = replacement.values.keys.firstOrNull()
+    require(firstField == null || !firstField.startsWith("\$")) {
+        "replaceOne only supports replacement documents"
     }
 }
 

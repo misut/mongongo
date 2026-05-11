@@ -911,6 +911,252 @@ class MongoCollectionTest {
             }
         }
     }
+
+    @Test
+    fun replaceOneSendsUpdateCommandAndReturnsMatchedAndModifiedCounts() = runTest {
+        val filter = BsonDocument("name" to BsonString("Ada"))
+        val replacement =
+            BsonDocument(
+                "name" to BsonString("Grace"),
+                "role" to BsonString("admin")
+            )
+
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                val updateCommand = receive()
+                assertEquals(listOf("update", "updates", "ordered", "\$db"), updateCommand.body.values.keys.toList())
+                assertEquals(BsonString("books"), updateCommand.body["update"])
+                assertEquals(BsonBoolean(true), updateCommand.body["ordered"])
+                assertEquals(BsonString("library"), updateCommand.body["\$db"])
+
+                val updates = updateCommand.body["updates"].asBson<BsonArray>()
+                assertEquals(1, updates.values.size)
+                val statement = updates.values.single().asBson<BsonDocument>()
+                assertEquals(listOf("q", "u", "multi", "upsert"), statement.values.keys.toList())
+                assertEquals(filter, statement["q"])
+                assertEquals(replacement, statement["u"])
+                assertEquals(BsonBoolean(false), statement["multi"])
+                assertEquals(BsonBoolean(false), statement["upsert"])
+
+                reply(
+                    updateCommand,
+                    BsonDocument(
+                        "ok" to BsonDouble(1.0),
+                        "n" to BsonInt32(1),
+                        "nModified" to BsonInt32(1)
+                    )
+                )
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                val result = client.database("library").collection("books").replaceOne(filter, replacement)
+                assertTrue(result.acknowledged)
+                assertEquals(1L, result.matchedCount)
+                assertEquals(1L, result.modifiedCount)
+                assertNull(result.upsertedId)
+                assertEquals(BsonInt32(1), result.raw["nModified"])
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
+    fun replaceOneReturnsUpsertedId() = runTest {
+        val upsertedId = BsonObjectId.fromHex("112233445566778899aabbcc")
+        val replacement = BsonDocument("name" to BsonString("Grace"))
+
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                val updateCommand = receive()
+                val statement =
+                    updateCommand
+                        .body["updates"]
+                        .asBson<BsonArray>()
+                        .values
+                        .single()
+                        .asBson<BsonDocument>()
+                assertEquals(replacement, statement["u"])
+                assertEquals(BsonBoolean(true), statement["upsert"])
+                reply(
+                    updateCommand,
+                    BsonDocument(
+                        "ok" to BsonDouble(1.0),
+                        "n" to BsonInt32(1),
+                        "nModified" to BsonInt32(0),
+                        "upserted" to
+                            BsonArray(
+                                listOf(
+                                    BsonDocument(
+                                        "index" to BsonInt32(0),
+                                        "_id" to upsertedId
+                                    )
+                                )
+                            )
+                    )
+                )
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                val result =
+                    client
+                        .database("library")
+                        .collection("books")
+                        .replaceOne(
+                            filter = BsonDocument("name" to BsonString("Grace")),
+                            replacement = replacement,
+                            upsert = true
+                        )
+                assertEquals(1L, result.matchedCount)
+                assertEquals(0L, result.modifiedCount)
+                assertEquals(upsertedId, result.upsertedId)
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
+    fun replaceOneRejectsOperatorDocument() = runTest {
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                assertFailsWith<IllegalArgumentException> {
+                    client
+                        .database("library")
+                        .collection("books")
+                        .replaceOne(
+                            filter = BsonDocument("name" to BsonString("Ada")),
+                            replacement = BsonDocument("\$set" to BsonDocument("name" to BsonString("Grace")))
+                        )
+                }
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
+    fun replaceOneFailsOnCommandFailure() = runTest {
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                val updateCommand = receive()
+                reply(
+                    updateCommand,
+                    BsonDocument(
+                        "ok" to BsonDouble(0.0),
+                        "code" to BsonInt32(13),
+                        "errmsg" to BsonString("not authorized")
+                    )
+                )
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                assertFailsWith<MongoCommandException> {
+                    client
+                        .database("library")
+                        .collection("books")
+                        .replaceOne(
+                            filter = BsonDocument(),
+                            replacement = BsonDocument("name" to BsonString("Ada"))
+                        )
+                }
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
+    fun replaceOneFailsOnWriteErrors() = runTest {
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                val updateCommand = receive()
+                reply(
+                    updateCommand,
+                    BsonDocument(
+                        "ok" to BsonDouble(1.0),
+                        "n" to BsonInt32(0),
+                        "nModified" to BsonInt32(0),
+                        "writeErrors" to
+                            BsonArray(
+                                listOf(
+                                    BsonDocument(
+                                        "index" to BsonInt32(0),
+                                        "code" to BsonInt32(66),
+                                        "errmsg" to BsonString("immutable field")
+                                    )
+                                )
+                            )
+                    )
+                )
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                assertFailsWith<MongoWriteException> {
+                    client
+                        .database("library")
+                        .collection("books")
+                        .replaceOne(
+                            filter = BsonDocument(),
+                            replacement = BsonDocument("name" to BsonString("Ada"))
+                        )
+                }
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
+    fun replaceOneFailsOnWriteConcernError() = runTest {
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                val updateCommand = receive()
+                reply(
+                    updateCommand,
+                    BsonDocument(
+                        "ok" to BsonDouble(1.0),
+                        "n" to BsonInt32(1),
+                        "nModified" to BsonInt32(1),
+                        "writeConcernError" to
+                            BsonDocument(
+                                "code" to BsonInt32(64),
+                                "errmsg" to BsonString("write concern failed")
+                            )
+                    )
+                )
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                assertFailsWith<MongoWriteException> {
+                    client
+                        .database("library")
+                        .collection("books")
+                        .replaceOne(
+                            filter = BsonDocument(),
+                            replacement = BsonDocument("name" to BsonString("Ada"))
+                        )
+                }
+            } finally {
+                client.close()
+            }
+        }
+    }
 }
 
 private inline fun <reified T : BsonValue> BsonValue?.asBson(): T =
