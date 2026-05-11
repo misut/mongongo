@@ -20,6 +20,7 @@ internal data class MongoConnectionString(
     val hosts: List<MongoHost>,
     val database: String?,
     val credential: MongoCredential?,
+    val tlsEnabled: Boolean,
     val redactedUri: String
 ) {
     val primaryHost: MongoHost
@@ -75,20 +76,23 @@ internal object MongoConnectionStringParser {
             hosts = authority.split(',').map(::parseHost),
             database = database,
             credential = credential,
+            tlsEnabled = options.tlsEnabled ?: false,
             redactedUri =
                 redactedUri(
                     hosts = authority.split(',').map(::parseHost),
                     database = database,
                     credential = credential,
                     authSource = options.authSource,
-                    authMechanism = options.authMechanism
+                    authMechanism = options.authMechanism,
+                    tlsEnabled = options.tlsEnabled ?: false
                 )
         )
     }
 
     private data class ConnectionOptions(
         val authSource: String? = null,
-        val authMechanism: String? = null
+        val authMechanism: String? = null,
+        val tlsEnabled: Boolean? = null
     )
 
     private fun parseOptions(query: String?): ConnectionOptions {
@@ -98,6 +102,7 @@ internal object MongoConnectionStringParser {
 
         var authSource: String? = null
         var authMechanism: String? = null
+        var tlsEnabled: Boolean? = null
         for (option in query.split('&')) {
             require(option.isNotEmpty()) { "MongoDB connection string options cannot contain blank entries" }
             val separator = option.indexOf('=')
@@ -115,12 +120,25 @@ internal object MongoConnectionStringParser {
                     authMechanism = value
                 }
                 "tls",
-                "ssl" -> validateTlsOption(name, value)
-                else -> throw UnsupportedOperationException("MongoDB connection string option $name is not supported yet")
+                "ssl" -> {
+                    val parsed = parseTlsOption(name, value)
+                    if (tlsEnabled != null && tlsEnabled != parsed) {
+                        throw IllegalArgumentException("MongoDB tls and ssl options must not conflict")
+                    }
+                    tlsEnabled = parsed
+                }
+                else -> {
+                    if (isUnsupportedTlsOption(name)) {
+                        throw UnsupportedOperationException(
+                            "MongoDB TLS/SSL connection string option $name is not supported yet"
+                        )
+                    }
+                    throw UnsupportedOperationException("MongoDB connection string option $name is not supported yet")
+                }
             }
         }
 
-        return ConnectionOptions(authSource = authSource, authMechanism = authMechanism)
+        return ConnectionOptions(authSource = authSource, authMechanism = authMechanism, tlsEnabled = tlsEnabled)
     }
 
     private fun validateMechanism(value: String) {
@@ -136,12 +154,16 @@ internal object MongoConnectionStringParser {
         }
     }
 
-    private fun validateTlsOption(name: String, value: String) {
+    private fun parseTlsOption(name: String, value: String): Boolean =
         when (value.lowercase()) {
-            "false" -> Unit
-            "true" -> throw UnsupportedOperationException("MongoDB TLS/SSL connection strings are not supported yet")
+            "false" -> false
+            "true" -> true
             else -> throw IllegalArgumentException("MongoDB $name option must be true or false")
         }
+
+    private fun isUnsupportedTlsOption(name: String): Boolean {
+        val lowerName = name.lowercase()
+        return lowerName.startsWith("tls") || lowerName.startsWith("ssl")
     }
 
     private fun percentDecode(value: String, label: String): String {
@@ -203,7 +225,8 @@ internal object MongoConnectionStringParser {
         database: String?,
         credential: MongoCredential?,
         authSource: String?,
-        authMechanism: String?
+        authMechanism: String?,
+        tlsEnabled: Boolean
     ): String {
         val builder = StringBuilder("mongodb://")
         if (credential != null) {
@@ -223,6 +246,9 @@ internal object MongoConnectionStringParser {
         }
         if (authMechanism != null) {
             options.add("authMechanism=$authMechanism")
+        }
+        if (tlsEnabled) {
+            options.add("tls=true")
         }
         if (options.isNotEmpty()) {
             builder.append("?")

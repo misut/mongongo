@@ -57,7 +57,7 @@ private const val WritablePrimaryRetryDelayMilliseconds = 100L
 public class MongoClient private constructor(
     public val connectionString: String,
     public val serverDescription: MongoServerDescription,
-    private val transport: KtorMongoTransport,
+    private val transport: MongoTransport,
     nextRequestId: Int
 ) {
     private val sendMutex = Mutex()
@@ -315,7 +315,7 @@ public class MongoClient private constructor(
                 for (host in connectionString.hosts) {
                     val transport =
                         try {
-                            KtorMongoTransport.connect(host)
+                            KtorMongoTransport.connect(host, tlsEnabled = connectionString.tlsEnabled)
                         } catch (throwable: Throwable) {
                             lastFailure = throwable
                             continue
@@ -359,10 +359,18 @@ public class MongoClient private constructor(
                         if (fallback == null) {
                             fallback = candidate
                         } else {
-                            transport.close()
+                            try {
+                                transport.close()
+                            } catch (closeFailure: Throwable) {
+                                lastFailure = closeFailure
+                            }
                         }
                     } catch (throwable: Throwable) {
-                        transport.close()
+                        try {
+                            transport.close()
+                        } catch (closeFailure: Throwable) {
+                            throwable.addSuppressed(closeFailure)
+                        }
                         lastFailure = throwable
                     }
                 }

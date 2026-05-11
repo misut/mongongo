@@ -36,6 +36,7 @@ kotlinx-serialization-core = { module = "org.jetbrains.kotlinx:kotlinx-serializa
 kotlinx-serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serialization-json", version.ref = "kotlinx-serialization" }
 
 ktor-network = { module = "io.ktor:ktor-network", version.ref = "ktor" }
+ktor-network-tls = { module = "io.ktor:ktor-network-tls", version.ref = "ktor" }
 
 mongodb-bson-kotlinx = { module = "org.mongodb:bson-kotlinx", version.ref = "mongodb" }
 mongodb-driver-kotlin-sync = { module = "org.mongodb:mongodb-driver-kotlin-sync", version.ref = "mongodb" }

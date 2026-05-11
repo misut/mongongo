@@ -15,6 +15,7 @@ kotlin {
             implementation(libs.cryptography.provider.optimal)
             implementation(libs.cryptography.random)
             implementation(libs.ktor.network)
+            implementation(libs.ktor.network.tls)
             implementation(libs.kotlinx.coroutines.core)
         }
 

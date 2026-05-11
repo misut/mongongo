@@ -25,7 +25,7 @@ internal object SecureMongoNonceGenerator : MongoNonceGenerator {
         Base64.Default.encode(CryptographyRandom.Default.nextBytes(24))
 }
 
-internal suspend fun KtorMongoTransport.authenticateScramSha256(
+internal suspend fun MongoTransport.authenticateScramSha256(
     credential: MongoCredential,
     nextRequestId: Int,
     nonceGenerator: MongoNonceGenerator = SecureMongoNonceGenerator
@@ -84,7 +84,7 @@ internal suspend fun KtorMongoTransport.authenticateScramSha256(
     return requestId
 }
 
-private suspend fun KtorMongoTransport.sendAuthenticationCommand(requestId: Int, body: BsonDocument): BsonDocument {
+private suspend fun MongoTransport.sendAuthenticationCommand(requestId: Int, body: BsonDocument): BsonDocument {
     val response =
         try {
             send(requestId = requestId, body = body)

@@ -289,21 +289,19 @@ class NativeMongoSmokeTest {
     @Test
     fun authenticatesConfiguredMongoUri() = runTest {
         val uri = environment("MONGONGO_AUTH_TEST_URI") ?: return@runTest
-        val databaseName = MongoConnectionStringParser.parse(uri).database ?: "test"
-        val client = MongoClient.connect(uri)
-        try {
-            assertEquals(1.0, client.ping(databaseName).ok)
-            val collection =
-                client
-                    .database(databaseName)
-                    .collection("native_auth_smoke_${Random.nextInt(0, Int.MAX_VALUE)}")
-            val insertResult = collection.insertOne(BsonDocument("name" to BsonString("native-auth")))
-            val insertedId = assertIs<BsonObjectId>(insertResult.insertedId)
-            val found = collection.findOne(BsonDocument("_id" to insertedId))
-            assertEquals(BsonString("native-auth"), found?.get("name"))
-        } finally {
-            client.close()
-        }
+        smokeConfiguredMongoUri(uri, marker = "native-auth")
+    }
+
+    @Test
+    fun smokesConfiguredTlsMongoUri() = runTest {
+        val uri = environment("MONGONGO_TLS_TEST_URI") ?: return@runTest
+        smokeConfiguredMongoUri(uri, marker = "native-tls")
+    }
+
+    @Test
+    fun smokesConfiguredAuthTlsMongoUri() = runTest {
+        val uri = environment("MONGONGO_AUTH_TLS_TEST_URI") ?: return@runTest
+        smokeConfiguredMongoUri(uri, marker = "native-auth-tls")
     }
 
     @Test
@@ -455,6 +453,24 @@ class NativeMongoSmokeTest {
             val deleteResult = collection.deleteOne(BsonDocument("_id" to insertedId))
             assertEquals(1L, deleteResult.deletedCount)
             assertNull(collection.findOne(BsonDocument("_id" to insertedId)))
+        } finally {
+            client.close()
+        }
+    }
+
+    private suspend fun smokeConfiguredMongoUri(uri: String, marker: String) {
+        val databaseName = MongoConnectionStringParser.parse(uri).database ?: "test"
+        val client = MongoClient.connect(uri)
+        try {
+            assertEquals(1.0, client.ping(databaseName).ok)
+            val collection =
+                client
+                    .database(databaseName)
+                    .collection("smoke_${marker.replace('-', '_')}_${Random.nextInt(0, Int.MAX_VALUE)}")
+            val insertResult = collection.insertOne(BsonDocument("name" to BsonString(marker)))
+            val insertedId = assertIs<BsonObjectId>(insertResult.insertedId)
+            val found = collection.findOne(BsonDocument("_id" to insertedId))
+            assertEquals(BsonString(marker), found?.get("name"))
         } finally {
             client.close()
         }
