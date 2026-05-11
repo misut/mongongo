@@ -5,6 +5,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import kotlinx.coroutines.test.runTest
 
 class MongoConnectionStringTest {
     @Test
@@ -82,6 +83,134 @@ class MongoConnectionStringTest {
     }
 
     @Test
+    fun parsesSrvConnectionStringThroughMongoTcpLookup() {
+        val resolver =
+            FakeMongoDnsResolver(
+                srvRecords =
+                    mapOf(
+                        "_mongodb._tcp.cluster.example.com" to
+                            listOf(MongoSrvRecord("mongo1.example.com.", 27017))
+                    )
+            )
+
+        val parsed = MongoConnectionStringParser.parse("mongodb+srv://cluster.example.com/test", resolver)
+
+        assertEquals(listOf("cluster.example.com"), resolver.txtQueries)
+        assertEquals(listOf("_mongodb._tcp.cluster.example.com"), resolver.srvQueries)
+        assertEquals(listOf(MongoHost("mongo1.example.com", 27017)), parsed.hosts)
+        assertEquals("test", parsed.database)
+        assertTrue(parsed.tlsEnabled)
+        assertEquals("mongodb://mongo1.example.com/test?tls=true", parsed.redactedUri)
+    }
+
+    @Test
+    fun sendsSrvRecordsThroughExistingMultiHostFlow() = runTest {
+        val first = MongoHost("mongo1.example.com", 27017)
+        val second = MongoHost("mongo2.example.com", 27017)
+        val firstTransport = ScriptedMongoTransport(hello(isWritablePrimary = false))
+        val secondTransport = ScriptedMongoTransport(hello(isWritablePrimary = true), ok())
+        val transportConnector =
+            ScriptedTransportConnector(
+                mapOf(
+                    first to firstTransport,
+                    second to secondTransport
+                )
+            )
+        val resolver =
+            FakeMongoDnsResolver(
+                srvRecords =
+                    mapOf(
+                        "_mongodb._tcp.cluster.example.com" to
+                            listOf(
+                                MongoSrvRecord(first.hostname, first.port),
+                                MongoSrvRecord(second.hostname, second.port)
+                            )
+                    )
+            )
+
+        val client =
+            MongoClient.connect(
+                uri = "mongodb+srv://cluster.example.com/test",
+                nonceGenerator = MongoNonceGenerator { "unused" },
+                dnsResolver = resolver,
+                transportConnector = transportConnector
+            )
+        try {
+            assertEquals(1.0, client.ping("test").ok)
+        } finally {
+            client.close()
+        }
+
+        assertEquals(listOf(first, second), transportConnector.connectedHosts)
+        assertTrue(firstTransport.closed)
+        assertTrue(secondTransport.closed)
+        assertEquals(BsonString("test"), secondTransport.sent.last()["\$db"])
+    }
+
+    @Test
+    fun mergesSrvTxtAndUriOptionsWithUriPrecedence() {
+        val resolver =
+            FakeMongoDnsResolver(
+                srvRecords =
+                    mapOf(
+                        "_mongodb._tcp.cluster.example.com" to
+                            listOf(MongoSrvRecord("mongo1.example.com", 27017))
+                    ),
+                txtRecords =
+                    mapOf(
+                        "cluster.example.com" to
+                            listOf("authSource=txt-admin&replicaSet=atlas-rs&tls=true&loadBalanced=false")
+                    )
+            )
+
+        val parsed =
+            MongoConnectionStringParser.parse(
+                "mongodb+srv://user:password@cluster.example.com/app?authSource=uri-admin&tls=false",
+                resolver
+            )
+
+        assertFalse(parsed.tlsEnabled)
+        assertEquals("atlas-rs", parsed.replicaSet)
+        assertEquals(false, parsed.loadBalanced)
+        assertEquals("uri-admin", parsed.credential?.authSource)
+        assertEquals(
+            "mongodb://<credentials>@mongo1.example.com/app?authSource=uri-admin&replicaSet=atlas-rs&loadBalanced=false",
+            parsed.redactedUri
+        )
+    }
+
+    @Test
+    fun allowsTxtTlsAndSslOverridesForSrvConnectionStrings() {
+        val tlsDisabled =
+            MongoConnectionStringParser.parse(
+                "mongodb+srv://cluster.example.com/test",
+                FakeMongoDnsResolver(
+                    srvRecords =
+                        mapOf(
+                            "_mongodb._tcp.cluster.example.com" to
+                                listOf(MongoSrvRecord("mongo1.example.com", 27017))
+                        ),
+                    txtRecords = mapOf("cluster.example.com" to listOf("tls=false"))
+                )
+            )
+        val sslDisabled =
+            MongoConnectionStringParser.parse(
+                "mongodb+srv://cluster.example.com/test",
+                FakeMongoDnsResolver(
+                    srvRecords =
+                        mapOf(
+                            "_mongodb._tcp.cluster.example.com" to
+                                listOf(MongoSrvRecord("mongo1.example.com", 27017))
+                        ),
+                    txtRecords = mapOf("cluster.example.com" to listOf("ssl=false"))
+                )
+            )
+
+        assertFalse(tlsDisabled.tlsEnabled)
+        assertFalse(sslDisabled.tlsEnabled)
+    }
+
+    @Test
     fun allowsDuplicateEquivalentTlsAndSslOptions() {
         val enabled = MongoConnectionStringParser.parse("mongodb://localhost/app?tls=true&ssl=true")
         val disabled = MongoConnectionStringParser.parse("mongodb://localhost/app?tls=false&ssl=false")
@@ -145,18 +274,170 @@ class MongoConnectionStringTest {
     @Test
     fun rejectsUnsupportedConnectionStringShapes() {
         assertFailsWith<UnsupportedOperationException> {
-            MongoConnectionStringParser.parse("mongodb+srv://cluster.example.com")
+            MongoConnectionStringParser.parse("mongodb://localhost/?loadBalanced=true")
         }
         for (mechanism in listOf("SCRAM-SHA-1", "MONGODB-X509", "PLAIN", "GSSAPI", "MONGODB-AWS", "UNKNOWN")) {
             assertFailsWith<UnsupportedOperationException> {
                 MongoConnectionStringParser.parse("mongodb://user:pass@localhost/?authMechanism=$mechanism")
             }
         }
-        assertFailsWith<UnsupportedOperationException> {
-            MongoConnectionStringParser.parse("mongodb://localhost/?replicaSet=rs0")
-        }
         assertFailsWith<IllegalArgumentException> {
             MongoConnectionStringParser.parse("mongodb://user:pass@localhost/?authSource=")
         }
     }
+
+    @Test
+    fun rejectsInvalidSrvConnectionStringsBeforeDnsLookup() {
+        val resolver = FakeMongoDnsResolver()
+
+        assertFailsWith<IllegalArgumentException> {
+            MongoConnectionStringParser.parse("mongodb+srv://cluster.example.com:27017/test", resolver)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            MongoConnectionStringParser.parse("mongodb+srv://one.example.com,two.example.com/test", resolver)
+        }
+
+        assertEquals(emptyList(), resolver.txtQueries)
+        assertEquals(emptyList(), resolver.srvQueries)
+    }
+
+    @Test
+    fun rejectsEmptySrvResultsAndDnsFailures() {
+        assertFailsWith<IllegalArgumentException> {
+            MongoConnectionStringParser.parse(
+                "mongodb+srv://cluster.example.com/test",
+                FakeMongoDnsResolver(srvRecords = mapOf("_mongodb._tcp.cluster.example.com" to emptyList()))
+            )
+        }
+        assertFailsWith<MongoDnsException> {
+            MongoConnectionStringParser.parse(
+                "mongodb+srv://cluster.example.com/test",
+                FakeMongoDnsResolver(srvFailure = IllegalStateException("boom"))
+            )
+        }
+        assertFailsWith<MongoDnsException> {
+            MongoConnectionStringParser.parse(
+                "mongodb+srv://cluster.example.com/test",
+                FakeMongoDnsResolver(txtFailure = IllegalStateException("boom"))
+            )
+        }
+    }
+
+    @Test
+    fun rejectsUnsupportedAndConflictingTxtOptions() {
+        assertFailsWith<UnsupportedOperationException> {
+            MongoConnectionStringParser.parse(
+                "mongodb+srv://cluster.example.com/test",
+                FakeMongoDnsResolver(
+                    srvRecords =
+                        mapOf(
+                            "_mongodb._tcp.cluster.example.com" to
+                                listOf(MongoSrvRecord("mongo1.example.com", 27017))
+                        ),
+                    txtRecords = mapOf("cluster.example.com" to listOf("retryWrites=true"))
+                )
+            )
+        }
+        assertFailsWith<IllegalArgumentException> {
+            MongoConnectionStringParser.parse(
+                "mongodb+srv://cluster.example.com/test",
+                FakeMongoDnsResolver(
+                    srvRecords =
+                        mapOf(
+                            "_mongodb._tcp.cluster.example.com" to
+                                listOf(MongoSrvRecord("mongo1.example.com", 27017))
+                        ),
+                    txtRecords = mapOf("cluster.example.com" to listOf("tls=true&ssl=false"))
+                )
+            )
+        }
+        assertFailsWith<IllegalArgumentException> {
+            MongoConnectionStringParser.parse(
+                "mongodb+srv://cluster.example.com/test",
+                FakeMongoDnsResolver(
+                    srvRecords =
+                        mapOf(
+                            "_mongodb._tcp.cluster.example.com" to
+                                listOf(MongoSrvRecord("mongo1.example.com", 27017))
+                        ),
+                    txtRecords = mapOf("cluster.example.com" to listOf("authSource=admin", "replicaSet=rs0"))
+                )
+            )
+        }
+    }
+
+    @Test
+    fun rejectsSrvTargetsOutsideParentDomain() {
+        assertFailsWith<IllegalArgumentException> {
+            MongoConnectionStringParser.parse(
+                "mongodb+srv://cluster.example.com/test",
+                FakeMongoDnsResolver(
+                    srvRecords =
+                        mapOf(
+                            "_mongodb._tcp.cluster.example.com" to
+                                listOf(MongoSrvRecord("mongo1.other.example.net", 27017))
+                        )
+                )
+            )
+        }
+    }
 }
+
+private class FakeMongoDnsResolver(
+    private val srvRecords: Map<String, List<MongoSrvRecord>> = emptyMap(),
+    private val txtRecords: Map<String, List<String>> = emptyMap(),
+    private val srvFailure: Throwable? = null,
+    private val txtFailure: Throwable? = null
+) : MongoDnsResolver {
+    val srvQueries = mutableListOf<String>()
+    val txtQueries = mutableListOf<String>()
+
+    override fun lookupSrv(name: String): List<MongoSrvRecord> {
+        srvQueries.add(name)
+        srvFailure?.let { throw it }
+        return srvRecords[name].orEmpty()
+    }
+
+    override fun lookupTxt(name: String): List<String> {
+        txtQueries.add(name)
+        txtFailure?.let { throw it }
+        return txtRecords[name].orEmpty()
+    }
+}
+
+private class ScriptedTransportConnector(
+    private val transports: Map<MongoHost, ScriptedMongoTransport>
+) : MongoTransportConnector {
+    val connectedHosts = mutableListOf<MongoHost>()
+
+    override suspend fun connect(host: MongoHost, tlsEnabled: Boolean): MongoTransport {
+        connectedHosts.add(host)
+        return transports[host] ?: error("No scripted transport for $host")
+    }
+}
+
+private class ScriptedMongoTransport(vararg responses: BsonDocument) : MongoTransport {
+    private val responses = ArrayDeque(responses.toList())
+    val sent = mutableListOf<BsonDocument>()
+    var closed = false
+
+    override suspend fun send(requestId: Int, body: BsonDocument): BsonDocument {
+        sent.add(body)
+        return responses.removeFirst()
+    }
+
+    override fun close() {
+        closed = true
+    }
+}
+
+private fun hello(isWritablePrimary: Boolean): BsonDocument =
+    BsonDocument(
+        "ok" to BsonDouble(1.0),
+        "isWritablePrimary" to BsonBoolean(isWritablePrimary),
+        "maxWireVersion" to BsonInt32(21),
+        "maxMessageSizeBytes" to BsonInt32(48_000_000),
+        "maxBsonObjectSize" to BsonInt32(16_777_216)
+    )
+
+private fun ok(): BsonDocument = BsonDocument("ok" to BsonDouble(1.0))

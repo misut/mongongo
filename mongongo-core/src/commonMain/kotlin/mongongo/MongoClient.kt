@@ -305,8 +305,13 @@ public class MongoClient private constructor(
         public suspend fun connect(uri: String): MongoClient =
             connect(uri = uri, nonceGenerator = SecureMongoNonceGenerator)
 
-        internal suspend fun connect(uri: String, nonceGenerator: MongoNonceGenerator): MongoClient {
-            val connectionString = MongoConnectionStringParser.parse(uri)
+        internal suspend fun connect(
+            uri: String,
+            nonceGenerator: MongoNonceGenerator,
+            dnsResolver: MongoDnsResolver = SystemMongoDnsResolver,
+            transportConnector: MongoTransportConnector = KtorMongoTransportConnector
+        ): MongoClient {
+            val connectionString = MongoConnectionStringParser.parse(uri = uri, dnsResolver = dnsResolver)
             var fallback: MongoClient? = null
             var lastFailure: Throwable? = null
             val attempts = if (connectionString.hosts.size > 1) WritablePrimaryRetryAttempts else 1
@@ -315,7 +320,7 @@ public class MongoClient private constructor(
                 for (host in connectionString.hosts) {
                     val transport =
                         try {
-                            KtorMongoTransport.connect(host, tlsEnabled = connectionString.tlsEnabled)
+                            transportConnector.connect(host, tlsEnabled = connectionString.tlsEnabled)
                         } catch (throwable: Throwable) {
                             lastFailure = throwable
                             continue

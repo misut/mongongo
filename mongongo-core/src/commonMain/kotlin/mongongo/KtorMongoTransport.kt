@@ -18,10 +18,19 @@ internal interface MongoTransport {
     fun close()
 }
 
+internal fun interface MongoTransportConnector {
+    suspend fun connect(host: MongoHost, tlsEnabled: Boolean): MongoTransport
+}
+
 internal class MongoTransportException(
     message: String,
     cause: Throwable? = null
 ) : RuntimeException(message, cause)
+
+internal object KtorMongoTransportConnector : MongoTransportConnector {
+    override suspend fun connect(host: MongoHost, tlsEnabled: Boolean): MongoTransport =
+        KtorMongoTransport.connect(host = host, tlsEnabled = tlsEnabled)
+}
 
 internal class KtorMongoTransport private constructor(
     private val selectorManager: SelectorManager,

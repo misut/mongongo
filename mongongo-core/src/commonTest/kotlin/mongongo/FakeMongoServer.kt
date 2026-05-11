@@ -54,7 +54,7 @@ internal class FakeMongoConnection(
 
     suspend fun receive(): OpMsgFrame = OpMsg.decode(input.readMongoMessage())
 
-    suspend fun expectHello(): OpMsgFrame {
+    suspend fun expectHello(isWritablePrimary: Boolean = true): OpMsgFrame {
         val hello = receive()
         assertEquals(BsonInt32(1), hello.body["hello"])
         assertEquals(BsonString("admin"), hello.body["\$db"])
@@ -63,7 +63,7 @@ internal class FakeMongoConnection(
             body =
                 BsonDocument(
                     "ok" to BsonDouble(1.0),
-                    "isWritablePrimary" to BsonBoolean(true),
+                    "isWritablePrimary" to BsonBoolean(isWritablePrimary),
                     "maxWireVersion" to BsonInt32(21),
                     "maxMessageSizeBytes" to BsonInt32(48_000_000),
                     "maxBsonObjectSize" to BsonInt32(16_777_216)

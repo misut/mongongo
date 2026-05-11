@@ -305,6 +305,18 @@ class NativeMongoSmokeTest {
     }
 
     @Test
+    fun smokesConfiguredSrvMongoUri() = runTest {
+        val uri = environment("MONGONGO_SRV_TEST_URI") ?: return@runTest
+        smokeConfiguredMongoUri(uri, marker = "native-srv")
+    }
+
+    @Test
+    fun smokesConfiguredAuthSrvMongoUri() = runTest {
+        val uri = environment("MONGONGO_AUTH_SRV_TEST_URI") ?: return@runTest
+        smokeConfiguredMongoUri(uri, marker = "native-auth-srv")
+    }
+
+    @Test
     fun pingsConfiguredMongoUri() = runTest {
         val uri = environment("MONGONGO_TEST_URI") ?: return@runTest
         val client = MongoClient.connect(uri)
