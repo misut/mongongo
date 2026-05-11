@@ -259,6 +259,98 @@ class EmbedMongoTest {
         }
     }
 
+    @Test
+    fun replacesDocumentWithMongongoClientAndVerifiesWithJvmDriver() = runTest {
+        val databaseName = "mongongo_test"
+        val collectionName = "replace_one_${Random.nextInt(0, Int.MAX_VALUE)}"
+        var insertedId: BsonObjectId? = null
+        val client = MongoClient.connect(shardedEmbedMongoCluster.connectionString.connectionString)
+        try {
+            val collection = client.database(databaseName).collection(collectionName)
+            val insertResult =
+                collection.insertOne(
+                    BsonDocument(
+                        "name" to BsonString("Ada"),
+                        "role" to BsonString("reader")
+                    )
+                )
+            val id = assertIs<BsonObjectId>(insertResult.insertedId)
+            insertedId = id
+
+            val replaceResult =
+                collection.replaceOne(
+                    filter = BsonDocument("_id" to id),
+                    replacement =
+                        BsonDocument(
+                            "_id" to id,
+                            "name" to BsonString("Grace")
+                        )
+                )
+            assertEquals(1L, replaceResult.matchedCount)
+            assertEquals(1L, replaceResult.modifiedCount)
+
+            val found = collection.findOne(BsonDocument("_id" to id))
+            assertEquals(id, found?.get("_id"))
+            assertEquals(BsonString("Grace"), found?.get("name"))
+            assertNull(found?.get("role"))
+        } finally {
+            client.close()
+        }
+
+        syncClient.use { verifier ->
+            val stored =
+                verifier
+                    .getDatabase(databaseName)
+                    .getCollection<Document>(collectionName)
+                    .find(Document("_id", ObjectId(insertedId.bytes.toByteArray())))
+                    .first()
+            assertEquals("Grace", stored.getString("name"))
+            assertNull(stored.getString("role"))
+        }
+    }
+
+    @Test
+    fun upsertsReplacementWithMongongoClientAndVerifiesWithJvmDriver() = runTest {
+        val databaseName = "mongongo_test"
+        val collectionName = "replace_one_upsert_${Random.nextInt(0, Int.MAX_VALUE)}"
+        var upsertedId: BsonObjectId? = null
+        val client = MongoClient.connect(shardedEmbedMongoCluster.connectionString.connectionString)
+        try {
+            val collection = client.database(databaseName).collection(collectionName)
+            val replaceResult =
+                collection.replaceOne(
+                    filter = BsonDocument("name" to BsonString("Linus")),
+                    replacement =
+                        BsonDocument(
+                            "name" to BsonString("Linus"),
+                            "role" to BsonString("maintainer")
+                        ),
+                    upsert = true
+                )
+            val id = assertIs<BsonObjectId>(replaceResult.upsertedId)
+            upsertedId = id
+            assertEquals(1L, replaceResult.matchedCount)
+            assertEquals(0L, replaceResult.modifiedCount)
+
+            val found = collection.findOne(BsonDocument("_id" to id))
+            assertEquals(BsonString("Linus"), found?.get("name"))
+            assertEquals(BsonString("maintainer"), found?.get("role"))
+        } finally {
+            client.close()
+        }
+
+        syncClient.use { verifier ->
+            val stored =
+                verifier
+                    .getDatabase(databaseName)
+                    .getCollection<Document>(collectionName)
+                    .find(Document("_id", ObjectId(upsertedId.bytes.toByteArray())))
+                    .first()
+            assertEquals("Linus", stored.getString("name"))
+            assertEquals("maintainer", stored.getString("role"))
+        }
+    }
+
     private fun BsonDocument.stringValue(name: String): String =
         (this[name] as? BsonString)?.value ?: error("Expected BSON string field $name")
 }
