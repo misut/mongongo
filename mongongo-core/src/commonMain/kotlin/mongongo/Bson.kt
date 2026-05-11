@@ -15,6 +15,58 @@ public data class BsonDocument(val values: Map<String, BsonValue>) : BsonValue {
     public constructor(vararg values: Pair<String, BsonValue>) : this(linkedMapOf(*values))
 
     public operator fun get(name: String): BsonValue? = values[name]
+
+    public fun isEmpty(): Boolean = values.isEmpty()
+
+    public operator fun contains(name: String): Boolean = values.containsKey(name)
+
+    public fun getDocument(name: String): BsonDocument? = values[name] as? BsonDocument
+
+    public fun getArray(name: String): BsonArray? = values[name] as? BsonArray
+
+    public fun getString(name: String): String? = (values[name] as? BsonString)?.value
+
+    public fun getBoolean(name: String): Boolean? = (values[name] as? BsonBoolean)?.value
+
+    public fun getInt32(name: String): Int? = (values[name] as? BsonInt32)?.value
+
+    public fun getInt64(name: String): Long? = (values[name] as? BsonInt64)?.value
+
+    public fun getDouble(name: String): Double? = (values[name] as? BsonDouble)?.value
+
+    public fun getNumberAsLong(name: String): Long? =
+        when (val value = values[name]) {
+            is BsonInt32 -> value.value.toLong()
+            is BsonInt64 -> value.value
+            else -> null
+        }
+
+    public fun plus(name: String, value: BsonValue): BsonDocument {
+        val copy = linkedMapOf<String, BsonValue>()
+        var replaced = false
+        for ((existingName, existingValue) in values) {
+            if (existingName == name) {
+                copy[existingName] = value
+                replaced = true
+            } else {
+                copy[existingName] = existingValue
+            }
+        }
+        if (!replaced) {
+            copy[name] = value
+        }
+        return BsonDocument(copy)
+    }
+
+    public fun without(name: String): BsonDocument {
+        val copy = linkedMapOf<String, BsonValue>()
+        for ((existingName, existingValue) in values) {
+            if (existingName != name) {
+                copy[existingName] = existingValue
+            }
+        }
+        return BsonDocument(copy)
+    }
 }
 
 internal fun BsonDocument.withValue(name: String, value: BsonValue): BsonDocument {
@@ -95,6 +147,83 @@ public data class BsonTimestamp(val increment: Int, val timestamp: Int) : BsonVa
 
 public data class BsonInt64(val value: Long) : BsonValue
 
+public fun bsonDocument(block: BsonDocumentBuilder.() -> Unit): BsonDocument =
+    BsonDocumentBuilder().apply(block).build()
+
+public class BsonDocumentBuilder {
+    private val values = linkedMapOf<String, BsonValue>()
+
+    public fun build(): BsonDocument = BsonDocument(values.toMap())
+
+    public fun value(name: String, value: BsonValue) {
+        values[name] = value
+    }
+
+    public fun double(name: String, value: Double) {
+        this.value(name, BsonDouble(value))
+    }
+
+    public fun string(name: String, value: String) {
+        this.value(name, BsonString(value))
+    }
+
+    public fun document(name: String, value: BsonDocument) {
+        this.value(name, value)
+    }
+
+    public fun document(name: String, block: BsonDocumentBuilder.() -> Unit) {
+        document(name, bsonDocument(block))
+    }
+
+    public fun array(name: String, values: List<BsonValue>) {
+        this.value(name, BsonArray(values))
+    }
+
+    public fun array(name: String, vararg values: BsonValue) {
+        array(name, values.toList())
+    }
+
+    public fun binary(name: String, subtype: Int, bytes: List<Byte>) {
+        this.value(name, BsonBinary(subtype = subtype, bytes = bytes))
+    }
+
+    public fun binary(name: String, subtype: Int, bytes: ByteArray) {
+        binary(name, subtype, bytes.toList())
+    }
+
+    public fun objectId(name: String, value: BsonObjectId) {
+        this.value(name, value)
+    }
+
+    public fun objectId(name: String, hex: String) {
+        objectId(name, BsonObjectId.fromHex(hex))
+    }
+
+    public fun boolean(name: String, value: Boolean) {
+        this.value(name, BsonBoolean(value))
+    }
+
+    public fun dateTime(name: String, epochMilliseconds: Long) {
+        this.value(name, BsonDateTime(epochMilliseconds))
+    }
+
+    public fun nullValue(name: String) {
+        this.value(name, BsonNull)
+    }
+
+    public fun int32(name: String, value: Int) {
+        this.value(name, BsonInt32(value))
+    }
+
+    public fun timestamp(name: String, increment: Int, timestamp: Int) {
+        this.value(name, BsonTimestamp(increment = increment, timestamp = timestamp))
+    }
+
+    public fun int64(name: String, value: Long) {
+        this.value(name, BsonInt64(value))
+    }
+}
+
 internal object BsonCodec {
     fun encode(document: BsonDocument): ByteArray {
         val writer = ByteWriter()
@@ -142,7 +271,11 @@ internal object BsonCodec {
             is BsonArray ->
                 writeDocument(
                     writer,
-                    BsonDocument(value.values.mapIndexed { index, item -> index.toString() to item }.toMap())
+                    BsonDocument(
+                        value.values
+                            .mapIndexed { index, item -> index.toString() to item }
+                            .toMap(linkedMapOf())
+                    )
                 )
             is BsonBinary -> {
                 writer.writeInt32(value.bytes.size)
@@ -219,107 +352,123 @@ private class ByteWriter {
 private class ByteReader(private val bytes: ByteArray) {
     private var position = 0
 
-    fun readDocument(): BsonDocument {
+    fun readDocument(): BsonDocument = readDocument(maxEnd = bytes.size)
+
+    private fun readDocument(maxEnd: Int): BsonDocument {
         val start = position
-        val length = readInt32()
+        val length = readInt32(limit = maxEnd)
         require(length >= 5) { "BSON document length must be at least 5 bytes" }
 
+        require(length <= bytes.size - start) { "BSON document length exceeds input size" }
         val end = start + length
-        require(end <= bytes.size) { "BSON document length exceeds input size" }
+        require(end <= maxEnd) { "BSON document length exceeds containing document" }
 
         val values = linkedMapOf<String, BsonValue>()
         while (position < end - 1) {
-            val type = readByte()
-            val name = readCString()
-            values[name] = readValue(type)
+            val type = readByte(limit = end)
+            val name = readCString(limit = end)
+            values[name] = readValue(type, end)
         }
 
-        require(readByte() == 0) { "BSON document must end with a null byte" }
+        require(readByte(limit = end) == 0) { "BSON document must end with a null byte" }
         require(position == end) { "BSON document parser stopped at the wrong offset" }
 
         return BsonDocument(values)
     }
 
-    private fun readValue(type: Int): BsonValue =
+    private fun readValue(type: Int, limit: Int): BsonValue =
         when (type) {
-            0x01 -> BsonDouble(readDouble())
-            0x02 -> BsonString(readString())
-            0x03 -> readDocument()
-            0x04 -> readArray()
+            0x01 -> BsonDouble(readDouble(limit))
+            0x02 -> BsonString(readString(limit))
+            0x03 -> readDocument(maxEnd = limit)
+            0x04 -> readArray(limit)
             0x05 -> {
-                val length = readInt32()
+                val length = readInt32(limit)
                 require(length >= 0) { "BSON binary length cannot be negative" }
-                val subtype = readByte()
-                BsonBinary(subtype, readBytes(length).toList())
+                val subtype = readByte(limit)
+                BsonBinary(subtype, readBytes(length, limit).toList())
             }
-            0x07 -> BsonObjectId(readBytes(12).toList())
-            0x08 -> BsonBoolean(readByte() != 0)
-            0x09 -> BsonDateTime(readInt64())
+            0x07 -> BsonObjectId(readBytes(12, limit).toList())
+            0x08 -> BsonBoolean(readByte(limit) != 0)
+            0x09 -> BsonDateTime(readInt64(limit))
             0x0a -> BsonNull
-            0x10 -> BsonInt32(readInt32())
+            0x10 -> BsonInt32(readInt32(limit))
             0x11 -> {
-                val packed = readInt64()
+                val packed = readInt64(limit)
                 BsonTimestamp(
                     increment = (packed and 0xffffffffL).toInt(),
                     timestamp = ((packed ushr 32) and 0xffffffffL).toInt()
                 )
             }
-            0x12 -> BsonInt64(readInt64())
-            else -> throw UnsupportedOperationException("Unsupported BSON type 0x${type.toString(16)}")
+            0x12 -> BsonInt64(readInt64(limit))
+            else -> throw IllegalArgumentException("Unsupported BSON type 0x${type.toString(16)}")
         }
 
-    private fun readArray(): BsonArray {
-        val document = readDocument()
+    private fun readArray(limit: Int): BsonArray {
+        val document = readDocument(maxEnd = limit)
         val values = mutableListOf<BsonValue>()
-        for (index in 0 until document.values.size) {
-            values.add(document.values[index.toString()] ?: error("BSON array is missing index $index"))
+        for ((expectedIndex, entry) in document.values.entries.withIndex()) {
+            val expectedName = expectedIndex.toString()
+            val actualIndex = entry.key.toIntOrNull()
+            require(actualIndex != null && actualIndex >= 0 && actualIndex.toString() == entry.key) {
+                "BSON array index ${entry.key} is invalid"
+            }
+            require(entry.key == expectedName) {
+                if (expectedName in document.values) {
+                    "BSON array index ${entry.key} is out of order, expected $expectedName"
+                } else {
+                    "BSON array is missing index $expectedName"
+                }
+            }
+            values.add(entry.value)
         }
         return BsonArray(values)
     }
 
-    private fun readByte(): Int {
-        require(position < bytes.size) { "Unexpected end of BSON input" }
+    private fun readByte(limit: Int = bytes.size): Int {
+        require(position < limit && position < bytes.size) { "Unexpected end of BSON input" }
         return bytes[position++].toInt() and 0xff
     }
 
-    private fun readBytes(length: Int): ByteArray {
+    private fun readBytes(length: Int, limit: Int = bytes.size): ByteArray {
         require(length >= 0) { "Byte length cannot be negative" }
-        require(position + length <= bytes.size) { "Unexpected end of BSON input" }
+        require(length <= bytes.size - position && length <= limit - position) { "Unexpected end of BSON input" }
         val result = bytes.copyOfRange(position, position + length)
         position += length
         return result
     }
 
-    private fun readCString(): String {
+    private fun readCString(limit: Int): String {
         val start = position
-        while (position < bytes.size && bytes[position] != 0.toByte()) {
+        while (position < limit && position < bytes.size && bytes[position] != 0.toByte()) {
             position++
         }
-        require(position < bytes.size) { "Unterminated BSON cstring" }
+        require(position < limit && position < bytes.size) { "Unterminated BSON cstring" }
         val value = bytes.copyOfRange(start, position).decodeToString()
         position++
         return value
     }
 
-    private fun readString(): String {
-        val length = readInt32()
+    private fun readString(limit: Int): String {
+        val length = readInt32(limit)
         require(length >= 1) { "BSON string length must include a trailing null byte" }
-        val value = readBytes(length - 1).decodeToString()
-        require(readByte() == 0) { "BSON string must end with a null byte" }
+        require(length <= bytes.size - position && length <= limit - position) { "Unterminated BSON string" }
+        val value = readBytes(length - 1, limit).decodeToString()
+        require(readByte(limit) == 0) { "Unterminated BSON string" }
         return value
     }
 
-    private fun readInt32(): Int {
+    private fun readInt32(limit: Int = bytes.size): Int {
         var result = 0
-        repeat(4) { index -> result = result or (readByte() shl (index * 8)) }
+        repeat(4) { index -> result = result or (readByte(limit) shl (index * 8)) }
         return result
     }
 
-    private fun readInt64(): Long {
+    private fun readInt64(limit: Int = bytes.size): Long {
         var result = 0L
-        repeat(8) { index -> result = result or (readByte().toLong() shl (index * 8)) }
+        repeat(8) { index -> result = result or (readByte(limit).toLong() shl (index * 8)) }
         return result
     }
 
-    private fun readDouble(): Double = Double.fromBits(readInt64())
+    private fun readDouble(limit: Int): Double = Double.fromBits(readInt64(limit))
 }

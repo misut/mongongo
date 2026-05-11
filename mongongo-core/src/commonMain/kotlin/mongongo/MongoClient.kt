@@ -455,7 +455,7 @@ private fun BsonDocument.toServerDescription(): MongoServerDescription =
         maxWireVersion = intValue("maxWireVersion"),
         maxMessageSizeBytes = intValue("maxMessageSizeBytes"),
         maxBsonObjectSize = intValue("maxBsonObjectSize"),
-        isWritablePrimary = booleanValue("isWritablePrimary") ?: booleanValue("ismaster") ?: false
+        isWritablePrimary = getBoolean("isWritablePrimary") ?: getBoolean("ismaster") ?: false
     )
 
 private fun BsonDocument.okValue(): Double =
@@ -467,29 +467,15 @@ private fun BsonDocument.okValue(): Double =
     }
 
 private fun BsonDocument.intValue(name: String): Int? =
-    when (val value = this[name]) {
-        is BsonInt32 -> value.value
-        is BsonInt64 -> value.value.toInt()
-        is BsonDouble -> value.value.toInt()
-        else -> null
-    }
+    getInt32(name) ?: getInt64(name)?.toInt() ?: getDouble(name)?.toInt()
 
-private fun BsonDocument.longValue(name: String): Long? =
-    when (val value = this[name]) {
-        is BsonInt64 -> value.value
-        is BsonInt32 -> value.value.toLong()
-        else -> null
-    }
-
-private fun BsonDocument.booleanValue(name: String): Boolean? = (this[name] as? BsonBoolean)?.value
-
-private fun BsonDocument.stringValue(name: String): String? = (this[name] as? BsonString)?.value
+private fun BsonDocument.longValue(name: String): Long? = getNumberAsLong(name)
 
 private fun BsonDocument.documentValue(name: String): BsonDocument =
-    this[name] as? BsonDocument ?: error("MongoDB response field $name was not a document")
+    getDocument(name) ?: error("MongoDB response field $name was not a document")
 
 private fun BsonDocument.arrayValue(name: String): BsonArray =
-    this[name] as? BsonArray ?: error("MongoDB response field $name was not an array")
+    getArray(name) ?: error("MongoDB response field $name was not an array")
 
 private fun BsonDocument.cursorBatch(batchName: String): MongoCursorBatch {
     val cursor = documentValue("cursor")
@@ -512,32 +498,32 @@ private fun requireUpdateOperatorDocument(update: BsonDocument) {
 }
 
 private fun BsonDocument.firstUpsertedId(): BsonValue? {
-    val upserted = this["upserted"] as? BsonArray ?: return null
+    val upserted = getArray("upserted") ?: return null
     val first = upserted.values.firstOrNull() ?: return null
     val document = first as? BsonDocument ?: error("MongoDB update response upserted entry was not a document")
     return document["_id"]
 }
 
 private fun BsonDocument.throwIfWriteFailed() {
-    val writeErrors = this["writeErrors"] as? BsonArray
+    val writeErrors = getArray("writeErrors")
     if (writeErrors != null && writeErrors.values.isNotEmpty()) {
         throw MongoWriteException(this)
     }
-    if (this["writeConcernError"] != null) {
+    if (contains("writeConcernError")) {
         throw MongoWriteException(this)
     }
 }
 
 private fun BsonDocument.writeFailureSummary(): String =
     when {
-        (this["writeErrors"] as? BsonArray)?.values?.isNotEmpty() == true -> " with writeErrors"
-        this["writeConcernError"] != null -> " with writeConcernError"
+        getArray("writeErrors")?.values?.isNotEmpty() == true -> " with writeErrors"
+        contains("writeConcernError") -> " with writeConcernError"
         else -> ""
     }
 
 private fun BsonDocument.commandFailureSummary(): String {
     val code = intValue("code")
-    val errmsg = stringValue("errmsg")
+    val errmsg = getString("errmsg")
     return when {
         code != null && errmsg != null -> " code=$code errmsg=$errmsg"
         code != null -> " code=$code"
