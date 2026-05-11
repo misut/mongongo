@@ -13,6 +13,31 @@ import platform.posix.getenv
 
 class NativeMongoSmokeTest {
     @Test
+    fun authenticatesAgainstFakeOpMsgServer() = runTest {
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                expectScramSha256Authentication(authSource = "admin")
+                val ping = receive()
+                assertEquals(BsonInt32(1), ping.body["ping"])
+                assertEquals(BsonString("native_auth"), ping.body["\$db"])
+                reply(ping, BsonDocument("ok" to BsonDouble(1.0)))
+            }
+        ) { baseUri ->
+            val client =
+                MongoClient.connect(
+                    uri = authUri(baseUri, database = "native_auth", authSource = "admin"),
+                    nonceGenerator = MongoNonceGenerator { "native-client-nonce" }
+                )
+            try {
+                assertEquals(1.0, client.ping("native_auth").ok)
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
     fun findsAgainstFakeOpMsgServer() = runTest {
         val filter = BsonDocument("name" to BsonString("Ada"))
         val found =
@@ -258,6 +283,26 @@ class NativeMongoSmokeTest {
             } finally {
                 client.close()
             }
+        }
+    }
+
+    @Test
+    fun authenticatesConfiguredMongoUri() = runTest {
+        val uri = environment("MONGONGO_AUTH_TEST_URI") ?: return@runTest
+        val databaseName = MongoConnectionStringParser.parse(uri).database ?: "test"
+        val client = MongoClient.connect(uri)
+        try {
+            assertEquals(1.0, client.ping(databaseName).ok)
+            val collection =
+                client
+                    .database(databaseName)
+                    .collection("native_auth_smoke_${Random.nextInt(0, Int.MAX_VALUE)}")
+            val insertResult = collection.insertOne(BsonDocument("name" to BsonString("native-auth")))
+            val insertedId = assertIs<BsonObjectId>(insertResult.insertedId)
+            val found = collection.findOne(BsonDocument("_id" to insertedId))
+            assertEquals(BsonString("native-auth"), found?.get("name"))
+        } finally {
+            client.close()
         }
     }
 

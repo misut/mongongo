@@ -11,6 +11,9 @@ kotlin {
 
     sourceSets {
         commonMain.dependencies {
+            implementation(libs.cryptography.core)
+            implementation(libs.cryptography.provider.optimal)
+            implementation(libs.cryptography.random)
             implementation(libs.ktor.network)
             implementation(libs.kotlinx.coroutines.core)
         }

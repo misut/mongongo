@@ -1,5 +1,6 @@
 package mongongo
 
+import com.mongodb.ConnectionString
 import com.mongodb.kotlin.client.MongoClient as JvmMongoClient
 import kotlinx.coroutines.test.runTest
 import kotlin.random.Random
@@ -16,6 +17,36 @@ class EmbedMongoTest {
         get() = JvmMongoClient.create(shardedEmbedMongoCluster.connectionString)
 
     data class TestDocument(val name: String)
+
+    @Test
+    fun authenticatesConfiguredMongoUriWithJvmDriverAndMongongoClient() = runTest {
+        val uri = System.getenv("MONGONGO_AUTH_TEST_URI") ?: return@runTest
+        val databaseName = ConnectionString(uri).database ?: "test"
+        val driverCollectionName = "jvm_auth_smoke_${Random.nextInt(0, Int.MAX_VALUE)}"
+        val mongongoCollectionName = "mongongo_auth_smoke_${Random.nextInt(0, Int.MAX_VALUE)}"
+
+        JvmMongoClient.create(uri).use { client ->
+            val database = client.getDatabase(databaseName)
+            assertEquals(1.0, database.runCommand(Document("ping", 1)).getDouble("ok"))
+
+            val id = ObjectId()
+            val collection = database.getCollection<Document>(driverCollectionName)
+            collection.insertOne(Document("_id", id).append("name", "jvm"))
+            assertEquals("jvm", collection.find(Document("_id", id)).first().getString("name"))
+        }
+
+        val client = MongoClient.connect(uri)
+        try {
+            assertEquals(1.0, client.ping(databaseName).ok)
+            val collection = client.database(databaseName).collection(mongongoCollectionName)
+            val insertResult = collection.insertOne(BsonDocument("name" to BsonString("mongongo")))
+            val insertedId = assertIs<BsonObjectId>(insertResult.insertedId)
+            val found = collection.findOne(BsonDocument("_id" to insertedId))
+            assertEquals(BsonString("mongongo"), found?.get("name"))
+        } finally {
+            client.close()
+        }
+    }
 
     @Test
     fun pingEmbeddedMongoWithJvmDriverAndMongongoClient() = runTest {

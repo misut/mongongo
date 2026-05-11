@@ -302,7 +302,10 @@ public class MongoClient private constructor(
     }
 
     public companion object {
-        public suspend fun connect(uri: String): MongoClient {
+        public suspend fun connect(uri: String): MongoClient =
+            connect(uri = uri, nonceGenerator = SecureMongoNonceGenerator)
+
+        internal suspend fun connect(uri: String, nonceGenerator: MongoNonceGenerator): MongoClient {
             val connectionString = MongoConnectionStringParser.parse(uri)
             var fallback: MongoClient? = null
             var lastFailure: Throwable? = null
@@ -333,12 +336,20 @@ public class MongoClient private constructor(
                             throw MongoCommandException(hello)
                         }
 
+                        val nextRequestId =
+                            connectionString.credential?.let { credential ->
+                                transport.authenticateScramSha256(
+                                    credential = credential,
+                                    nextRequestId = 2,
+                                    nonceGenerator = nonceGenerator
+                                )
+                            } ?: 2
                         val candidate =
                             MongoClient(
-                                connectionString = uri,
+                                connectionString = connectionString.redactedUri,
                                 serverDescription = hello.toServerDescription(),
                                 transport = transport,
-                                nextRequestId = 2
+                                nextRequestId = nextRequestId
                             )
                         if (candidate.serverDescription.isWritablePrimary) {
                             fallback?.close()
