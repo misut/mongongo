@@ -270,6 +270,48 @@ class EmbedMongoTest {
     }
 
     @Test
+    fun updatesManyDocumentsWithMongongoClientAndVerifiesWithJvmDriver() = runTest {
+        val databaseName = "mongongo_test"
+        val collectionName = "update_many_${Random.nextInt(0, Int.MAX_VALUE)}"
+        var matchedCount = 0L
+        var modifiedCount = 0L
+        val client = MongoClient.connect(shardedEmbedMongoCluster.connectionString.connectionString)
+        try {
+            val collection = client.database(databaseName).collection(collectionName)
+            collection.insertMany(
+                listOf(
+                    BsonDocument("name" to BsonString("Ada"), "status" to BsonString("draft")),
+                    BsonDocument("name" to BsonString("Grace"), "status" to BsonString("draft")),
+                    BsonDocument("name" to BsonString("Linus"), "status" to BsonString("published"))
+                )
+            )
+
+            val updateResult =
+                collection.updateMany(
+                    filter = BsonDocument("status" to BsonString("draft")),
+                    update = BsonDocument("\$set" to BsonDocument("status" to BsonString("reviewed")))
+                )
+            matchedCount = updateResult.matchedCount
+            modifiedCount = updateResult.modifiedCount
+            assertEquals(2L, matchedCount)
+            assertEquals(2L, modifiedCount)
+
+            val found = collection.find().toList()
+            assertEquals(2, found.count { it.stringValue("status") == "reviewed" })
+            assertEquals(1, found.count { it.stringValue("status") == "published" })
+        } finally {
+            client.close()
+        }
+
+        syncClient.use { verifier ->
+            val collection = verifier.getDatabase(databaseName).getCollection<Document>(collectionName)
+            assertEquals(matchedCount, collection.countDocuments(Document("status", "reviewed")))
+            assertEquals(modifiedCount, collection.countDocuments(Document("status", "reviewed")))
+            assertEquals(1L, collection.countDocuments(Document("status", "published")))
+        }
+    }
+
+    @Test
     fun findsDocumentsInsertedWithMongongoClientAndVerifiesWithJvmDriver() = runTest {
         val databaseName = "mongongo_test"
         val collectionName = "find_many_${Random.nextInt(0, Int.MAX_VALUE)}"
@@ -353,6 +395,41 @@ class EmbedMongoTest {
                     .first()
             assertEquals("Grace", stored.getString("name"))
             assertEquals("admin", stored.getString("role"))
+        }
+    }
+
+    @Test
+    fun upsertsWithUpdateManyAndVerifiesWithJvmDriver() = runTest {
+        val databaseName = "mongongo_test"
+        val collectionName = "update_many_upsert_${Random.nextInt(0, Int.MAX_VALUE)}"
+        var upsertedId: BsonObjectId? = null
+        val client = MongoClient.connect(shardedEmbedMongoCluster.connectionString.connectionString)
+        try {
+            val collection = client.database(databaseName).collection(collectionName)
+            val updateResult =
+                collection.updateMany(
+                    filter = BsonDocument("name" to BsonString("Batch")),
+                    update = BsonDocument("\$set" to BsonDocument("role" to BsonString("created"))),
+                    upsert = true
+                )
+            val id = assertIs<BsonObjectId>(updateResult.upsertedId)
+            upsertedId = id
+            assertEquals(1L, updateResult.matchedCount)
+            assertEquals(0L, updateResult.modifiedCount)
+
+            val found = collection.findOne(BsonDocument("_id" to id))
+            assertEquals(BsonString("Batch"), found?.get("name"))
+            assertEquals(BsonString("created"), found?.get("role"))
+        } finally {
+            client.close()
+        }
+
+        syncClient.use { verifier ->
+            val collection = verifier.getDatabase(databaseName).getCollection<Document>(collectionName)
+            assertEquals(1L, collection.countDocuments(Document("name", "Batch")))
+            val stored = collection.find(Document("_id", ObjectId(upsertedId.bytes.toByteArray()))).first()
+            assertEquals("Batch", stored.getString("name"))
+            assertEquals("created", stored.getString("role"))
         }
     }
 

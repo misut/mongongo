@@ -199,12 +199,31 @@ public class MongoClient private constructor(
         update: BsonDocument,
         upsert: Boolean
     ): UpdateResult {
-        requireUpdateOperatorDocument(update)
-        return runSingleUpdate(
+        requireUpdateOperatorDocument(update, operation = "updateOne")
+        return runUpdate(
             database = database,
             collection = collection,
             filter = filter,
             update = update,
+            multi = false,
+            upsert = upsert
+        )
+    }
+
+    internal suspend fun updateMany(
+        database: String,
+        collection: String,
+        filter: BsonDocument,
+        update: BsonDocument,
+        upsert: Boolean
+    ): UpdateResult {
+        requireUpdateOperatorDocument(update, operation = "updateMany")
+        return runUpdate(
+            database = database,
+            collection = collection,
+            filter = filter,
+            update = update,
+            multi = true,
             upsert = upsert
         )
     }
@@ -217,20 +236,22 @@ public class MongoClient private constructor(
         upsert: Boolean
     ): UpdateResult {
         requireReplacementDocument(replacement)
-        return runSingleUpdate(
+        return runUpdate(
             database = database,
             collection = collection,
             filter = filter,
             update = replacement,
+            multi = false,
             upsert = upsert
         )
     }
 
-    private suspend fun runSingleUpdate(
+    private suspend fun runUpdate(
         database: String,
         collection: String,
         filter: BsonDocument,
         update: BsonDocument,
+        multi: Boolean,
         upsert: Boolean
     ): UpdateResult {
         val result =
@@ -243,7 +264,7 @@ public class MongoClient private constructor(
                                 BsonDocument(
                                     "q" to filter,
                                     "u" to update,
-                                    "multi" to BsonBoolean(false),
+                                    "multi" to BsonBoolean(multi),
                                     "upsert" to BsonBoolean(upsert)
                                 )
                             )
@@ -542,6 +563,19 @@ public class MongoCollection internal constructor(
             upsert = upsert
         )
 
+    public suspend fun updateMany(
+        filter: BsonDocument,
+        update: BsonDocument,
+        upsert: Boolean = false
+    ): UpdateResult =
+        database.client.updateMany(
+            database = database.name,
+            collection = name,
+            filter = filter,
+            update = update,
+            upsert = upsert
+        )
+
     public suspend fun replaceOne(
         filter: BsonDocument,
         replacement: BsonDocument,
@@ -612,10 +646,10 @@ private fun BsonDocument.cursorBatch(batchName: String): MongoCursorBatch {
     return MongoCursorBatch(id = cursorId, documents = documents)
 }
 
-private fun requireUpdateOperatorDocument(update: BsonDocument) {
+private fun requireUpdateOperatorDocument(update: BsonDocument, operation: String) {
     val firstField = update.values.keys.firstOrNull()
     require(firstField != null && firstField.startsWith("\$")) {
-        "updateOne only supports update operator documents"
+        "$operation only supports update operator documents"
     }
 }
 

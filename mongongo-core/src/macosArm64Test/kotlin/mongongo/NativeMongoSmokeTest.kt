@@ -314,6 +314,49 @@ class NativeMongoSmokeTest {
     }
 
     @Test
+    fun updatesManyAgainstFakeOpMsgServer() = runTest {
+        val filter = BsonDocument("status" to BsonString("draft"))
+        val update = BsonDocument("\$set" to BsonDocument("status" to BsonString("reviewed")))
+
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                val updateCommand = receive()
+                assertEquals(BsonString("native_books"), updateCommand.body["update"])
+                assertEquals(BsonBoolean(true), updateCommand.body["ordered"])
+                assertEquals(BsonString("native_library"), updateCommand.body["\$db"])
+                val updates = updateCommand.body["updates"] as BsonArray
+                val statement = updates.values.single() as BsonDocument
+                assertEquals(filter, statement["q"])
+                assertEquals(update, statement["u"])
+                assertEquals(BsonBoolean(true), statement["multi"])
+                assertEquals(BsonBoolean(true), statement["upsert"])
+                reply(
+                    updateCommand,
+                    BsonDocument(
+                        "ok" to BsonDouble(1.0),
+                        "n" to BsonInt32(2),
+                        "nModified" to BsonInt32(2)
+                    )
+                )
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                val result =
+                    client
+                        .database("native_library")
+                        .collection("native_books")
+                        .updateMany(filter = filter, update = update, upsert = true)
+                assertEquals(2L, result.matchedCount)
+                assertEquals(2L, result.modifiedCount)
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
     fun replacesAgainstFakeOpMsgServer() = runTest {
         val filter = BsonDocument("name" to BsonString("Ada"))
         val replacement =
@@ -508,6 +551,37 @@ class NativeMongoSmokeTest {
             assertEquals(1L, updateResult.modifiedCount)
             val found = collection.findOne(BsonDocument("_id" to insertedId))
             assertEquals(BsonString("writer"), found?.get("role"))
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun insertsUpdatesManyAndFindsConfiguredMongoUri() = runTest {
+        val uri = environment("MONGONGO_TEST_URI") ?: return@runTest
+        val client = MongoClient.connect(uri)
+        try {
+            val collection =
+                client
+                    .database("mongongo_native_smoke")
+                    .collection("update_many_${Random.nextInt(0, Int.MAX_VALUE)}")
+            collection.insertMany(
+                listOf(
+                    BsonDocument("name" to BsonString("native-a"), "status" to BsonString("draft")),
+                    BsonDocument("name" to BsonString("native-b"), "status" to BsonString("draft")),
+                    BsonDocument("name" to BsonString("native-c"), "status" to BsonString("published"))
+                )
+            )
+            val updateResult =
+                collection.updateMany(
+                    filter = BsonDocument("status" to BsonString("draft")),
+                    update = BsonDocument("\$set" to BsonDocument("status" to BsonString("reviewed")))
+                )
+            assertEquals(2L, updateResult.matchedCount)
+            assertEquals(2L, updateResult.modifiedCount)
+            val found = collection.find().toList()
+            assertEquals(2, found.count { it.stringValue("status") == "reviewed" })
+            assertEquals(1, found.count { it.stringValue("status") == "published" })
         } finally {
             client.close()
         }
