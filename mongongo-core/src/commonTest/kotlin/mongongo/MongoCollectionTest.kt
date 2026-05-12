@@ -9,6 +9,211 @@ import kotlin.test.assertTrue
 
 class MongoCollectionTest {
     @Test
+    fun listCollectionNamesSendsListCollectionsCommandAndReturnsFirstBatchNames() = runTest {
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                val listCollections = receive()
+                assertEquals(listOf("listCollections", "nameOnly", "\$db"), listCollections.body.values.keys.toList())
+                assertEquals(BsonInt32(1), listCollections.body["listCollections"])
+                assertEquals(BsonBoolean(true), listCollections.body["nameOnly"])
+                assertEquals(BsonString("library"), listCollections.body["\$db"])
+
+                reply(
+                    listCollections,
+                    BsonDocument(
+                        "cursor" to
+                            BsonDocument(
+                                "id" to BsonInt64(0),
+                                "ns" to BsonString("library.\$cmd.listCollections"),
+                                "firstBatch" to
+                                    BsonArray(
+                                        listOf(
+                                            BsonDocument("name" to BsonString("books")),
+                                            BsonDocument("name" to BsonString("authors"))
+                                        )
+                                    )
+                            ),
+                        "ok" to BsonDouble(1.0)
+                    )
+                )
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                val result = client.database("library").listCollectionNames()
+                assertEquals(listOf("books", "authors"), result)
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
+    fun listCollectionNamesUsesGetMoreWhenCursorRemainsOpen() = runTest {
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                val listCollections = receive()
+                reply(
+                    listCollections,
+                    BsonDocument(
+                        "cursor" to
+                            BsonDocument(
+                                "id" to BsonInt64(123),
+                                "ns" to BsonString("library.\$cmd.listCollections"),
+                                "firstBatch" to BsonArray(listOf(BsonDocument("name" to BsonString("books"))))
+                            ),
+                        "ok" to BsonDouble(1.0)
+                    )
+                )
+
+                val getMore = receive()
+                assertEquals(listOf("getMore", "collection", "\$db"), getMore.body.values.keys.toList())
+                assertEquals(BsonInt64(123), getMore.body["getMore"])
+                assertEquals(BsonString("\$cmd.listCollections"), getMore.body["collection"])
+                assertEquals(BsonString("library"), getMore.body["\$db"])
+                reply(
+                    getMore,
+                    BsonDocument(
+                        "cursor" to
+                            BsonDocument(
+                                "id" to BsonInt64(0),
+                                "ns" to BsonString("library.\$cmd.listCollections"),
+                                "nextBatch" to BsonArray(listOf(BsonDocument("name" to BsonString("authors"))))
+                            ),
+                        "ok" to BsonDouble(1.0)
+                    )
+                )
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                val result = client.database("library").listCollectionNames()
+                assertEquals(listOf("books", "authors"), result)
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
+    fun listCollectionNamesFailsOnCommandFailure() = runTest {
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                val listCollections = receive()
+                reply(
+                    listCollections,
+                    BsonDocument(
+                        "ok" to BsonDouble(0.0),
+                        "code" to BsonInt32(13),
+                        "errmsg" to BsonString("not authorized")
+                    )
+                )
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                assertFailsWith<MongoCommandException> {
+                    client.database("library").listCollectionNames()
+                }
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
+    fun createCollectionSendsCreateCommand() = runTest {
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                val create = receive()
+                assertEquals(listOf("create", "\$db"), create.body.values.keys.toList())
+                assertEquals(BsonString("books"), create.body["create"])
+                assertEquals(BsonString("library"), create.body["\$db"])
+                reply(create, BsonDocument("ok" to BsonDouble(1.0)))
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                val result = client.database("library").createCollection("books")
+                assertEquals(1.0, result.ok)
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
+    fun createCollectionRejectsBlankName() = runTest {
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                assertFailsWith<IllegalArgumentException> {
+                    client.database("library").createCollection(" ")
+                }
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
+    fun dropSendsDropCommand() = runTest {
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                val drop = receive()
+                assertEquals(listOf("drop", "\$db"), drop.body.values.keys.toList())
+                assertEquals(BsonString("books"), drop.body["drop"])
+                assertEquals(BsonString("library"), drop.body["\$db"])
+                reply(drop, BsonDocument("ok" to BsonDouble(1.0), "ns" to BsonString("library.books")))
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                val result = client.database("library").collection("books").drop()
+                assertEquals(1.0, result.ok)
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
+    fun dropFailsOnCommandFailure() = runTest {
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                val drop = receive()
+                reply(
+                    drop,
+                    BsonDocument(
+                        "ok" to BsonDouble(0.0),
+                        "code" to BsonInt32(26),
+                        "errmsg" to BsonString("ns not found")
+                    )
+                )
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                assertFailsWith<MongoCommandException> {
+                    client.database("library").collection("books").drop()
+                }
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
     fun findOneSendsFindCommandAndReturnsFirstBatchDocument() = runTest {
         val filter = BsonDocument("name" to BsonString("Ada"))
         val found =

@@ -140,6 +140,54 @@ class NativeMongoSmokeTest {
     }
 
     @Test
+    fun runsDatabaseCommandsAgainstFakeOpMsgServer() = runTest {
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                val create = receive()
+                assertEquals(BsonString("native_commands"), create.body["create"])
+                assertEquals(BsonString("native_library"), create.body["\$db"])
+                reply(create, BsonDocument("ok" to BsonDouble(1.0)))
+
+                val listCollections = receive()
+                assertEquals(BsonInt32(1), listCollections.body["listCollections"])
+                assertEquals(BsonBoolean(true), listCollections.body["nameOnly"])
+                assertEquals(BsonString("native_library"), listCollections.body["\$db"])
+                reply(
+                    listCollections,
+                    BsonDocument(
+                        "cursor" to
+                            BsonDocument(
+                                "id" to BsonInt64(0),
+                                "ns" to BsonString("native_library.\$cmd.listCollections"),
+                                "firstBatch" to
+                                    BsonArray(
+                                        listOf(BsonDocument("name" to BsonString("native_commands")))
+                                    )
+                            ),
+                        "ok" to BsonDouble(1.0)
+                    )
+                )
+
+                val drop = receive()
+                assertEquals(BsonString("native_commands"), drop.body["drop"])
+                assertEquals(BsonString("native_library"), drop.body["\$db"])
+                reply(drop, BsonDocument("ok" to BsonDouble(1.0)))
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                val database = client.database("native_library")
+                assertEquals(1.0, database.createCollection("native_commands").ok)
+                assertEquals(listOf("native_commands"), database.listCollectionNames())
+                assertEquals(1.0, database.collection("native_commands").drop().ok)
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
     fun insertsAgainstFakeOpMsgServer() = runTest {
         withFakeMongoServer(
             handler = {
@@ -439,6 +487,22 @@ class NativeMongoSmokeTest {
         val client = MongoClient.connect(uri)
         try {
             assertEquals(1.0, client.ping().ok)
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun createsListsAndDropsConfiguredMongoUri() = runTest {
+        val uri = environment("MONGONGO_TEST_URI") ?: return@runTest
+        val collectionName = "database_commands_${Random.nextInt(0, Int.MAX_VALUE)}"
+        val client = MongoClient.connect(uri)
+        try {
+            val database = client.database("mongongo_native_smoke")
+            assertEquals(1.0, database.createCollection(collectionName).ok)
+            assertTrue(collectionName in database.listCollectionNames())
+            assertEquals(1.0, database.collection(collectionName).drop().ok)
+            assertTrue(collectionName !in database.listCollectionNames())
         } finally {
             client.close()
         }

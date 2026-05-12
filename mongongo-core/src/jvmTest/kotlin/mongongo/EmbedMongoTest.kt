@@ -8,6 +8,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 import org.bson.Document
 import org.bson.types.ObjectId
 
@@ -60,6 +61,33 @@ class EmbedMongoTest {
             assertEquals(1.0, client.ping().ok)
         } finally {
             client.close()
+        }
+    }
+
+    @Test
+    fun createsListsAndDropsCollectionWithMongongoClientAndVerifiesWithJvmDriver() = runTest {
+        val databaseName = "mongongo_test"
+        val collectionName = "database_commands_${Random.nextInt(0, Int.MAX_VALUE)}"
+        val client = MongoClient.connect(shardedEmbedMongoCluster.connectionString.connectionString)
+        try {
+            val database = client.database(databaseName)
+            assertEquals(1.0, database.createCollection(collectionName).ok)
+            assertTrue(collectionName in database.listCollectionNames())
+
+            syncClient.use { verifier ->
+                val names = verifier.getDatabase(databaseName).listCollectionNames().toList()
+                assertTrue(collectionName in names)
+            }
+
+            assertEquals(1.0, database.collection(collectionName).drop().ok)
+            assertTrue(collectionName !in database.listCollectionNames())
+        } finally {
+            client.close()
+        }
+
+        syncClient.use { verifier ->
+            val names = verifier.getDatabase(databaseName).listCollectionNames().toList()
+            assertTrue(collectionName !in names)
         }
     }
 

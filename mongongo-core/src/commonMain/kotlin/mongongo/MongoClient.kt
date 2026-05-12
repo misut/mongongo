@@ -344,6 +344,47 @@ public class MongoClient private constructor(
         )
     }
 
+    internal suspend fun listCollectionNames(database: String): List<String> {
+        val result =
+            runCommand(
+                BsonDocument(
+                    "listCollections" to BsonInt32(1),
+                    "nameOnly" to BsonBoolean(true),
+                    "\$db" to BsonString(database)
+                )
+            )
+        val batch = result.raw.cursorBatch("firstBatch")
+        val cursor =
+            MongoCursor(
+                client = this,
+                database = database,
+                collection = "\$cmd.listCollections",
+                initialCursorId = batch.id,
+                initialBatch = batch.documents
+            )
+        return cursor.toList().map { document ->
+            document.getString("name") ?: error("MongoDB listCollections response document did not contain string name")
+        }
+    }
+
+    internal suspend fun createCollection(database: String, collection: String): MongoCommandResult {
+        require(collection.isNotBlank()) { "MongoDB collection name cannot be blank" }
+        return runCommand(
+            BsonDocument(
+                "create" to BsonString(collection),
+                "\$db" to BsonString(database)
+            )
+        )
+    }
+
+    internal suspend fun dropCollection(database: String, collection: String): MongoCommandResult =
+        runCommand(
+            BsonDocument(
+                "drop" to BsonString(collection),
+                "\$db" to BsonString(database)
+            )
+        )
+
     internal suspend fun findOne(database: String, collection: String, filter: BsonDocument): BsonDocument? {
         val result =
             runCommand(
@@ -528,6 +569,11 @@ public class MongoDatabase internal constructor(
         require(name.isNotBlank()) { "MongoDB collection name cannot be blank" }
         return MongoCollection(database = this, name = name)
     }
+
+    public suspend fun listCollectionNames(): List<String> = client.listCollectionNames(database = name)
+
+    public suspend fun createCollection(name: String): MongoCommandResult =
+        client.createCollection(database = this.name, collection = name)
 }
 
 public class MongoCollection internal constructor(
@@ -604,6 +650,9 @@ public class MongoCollection internal constructor(
             limit = limit,
             batchSize = batchSize
         )
+
+    public suspend fun drop(): MongoCommandResult =
+        database.client.dropCollection(database = database.name, collection = name)
 }
 
 private fun BsonDocument.toServerDescription(): MongoServerDescription =
