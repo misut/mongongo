@@ -92,6 +92,53 @@ class EmbedMongoTest {
     }
 
     @Test
+    fun createsListsAndDropsIndexWithMongongoClientAndVerifiesWithJvmDriver() = runTest {
+        val databaseName = "mongongo_test"
+        val collectionName = "index_commands_${Random.nextInt(0, Int.MAX_VALUE)}"
+        val indexName = "name_1_age_-1"
+        val client = MongoClient.connect(shardedEmbedMongoCluster.connectionString.connectionString)
+        try {
+            val collection = client.database(databaseName).collection(collectionName)
+            val createdName =
+                collection.createIndex(
+                    BsonDocument(
+                        "name" to BsonInt32(1),
+                        "age" to BsonInt32(-1)
+                    )
+                )
+            assertEquals(indexName, createdName)
+            assertTrue(indexName in collection.listIndexNames())
+
+            syncClient.use { verifier ->
+                val names =
+                    verifier
+                        .getDatabase(databaseName)
+                        .getCollection<Document>(collectionName)
+                        .listIndexes()
+                        .map { it.getString("name") }
+                        .toList()
+                assertTrue(indexName in names)
+            }
+
+            assertEquals(1.0, collection.dropIndex(indexName).ok)
+            assertTrue(indexName !in collection.listIndexNames())
+        } finally {
+            client.close()
+        }
+
+        syncClient.use { verifier ->
+            val names =
+                verifier
+                    .getDatabase(databaseName)
+                    .getCollection<Document>(collectionName)
+                    .listIndexes()
+                    .map { it.getString("name") }
+                    .toList()
+            assertTrue(indexName !in names)
+        }
+    }
+
+    @Test
     fun insertsDocumentWithMongongoClientAndReadsItWithJvmDriver() = runTest {
         val databaseName = "mongongo_test"
         val collectionName = "insert_one_${Random.nextInt(0, Int.MAX_VALUE)}"

@@ -214,6 +214,252 @@ class MongoCollectionTest {
     }
 
     @Test
+    fun createIndexSendsCreateIndexesCommandAndReturnsGeneratedName() = runTest {
+        val keys = BsonDocument("name" to BsonInt32(1), "age" to BsonInt32(-1))
+
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                val createIndexes = receive()
+                assertEquals(listOf("createIndexes", "indexes", "\$db"), createIndexes.body.values.keys.toList())
+                assertEquals(BsonString("books"), createIndexes.body["createIndexes"])
+                assertEquals(BsonString("library"), createIndexes.body["\$db"])
+
+                val indexes = createIndexes.body["indexes"].asBson<BsonArray>()
+                val index = indexes.values.single().asBson<BsonDocument>()
+                assertEquals(listOf("key", "name"), index.values.keys.toList())
+                assertEquals(keys, index["key"])
+                assertEquals(BsonString("name_1_age_-1"), index["name"])
+                assertNull(index["unique"])
+
+                reply(createIndexes, BsonDocument("ok" to BsonDouble(1.0)))
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                val result = client.database("library").collection("books").createIndex(keys)
+                assertEquals("name_1_age_-1", result)
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
+    fun createIndexSendsExplicitNameAndUniqueTrue() = runTest {
+        val keys = BsonDocument("email" to BsonInt32(1))
+
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                val createIndexes = receive()
+                val index =
+                    createIndexes
+                        .body["indexes"]
+                        .asBson<BsonArray>()
+                        .values
+                        .single()
+                        .asBson<BsonDocument>()
+                assertEquals(listOf("key", "name", "unique"), index.values.keys.toList())
+                assertEquals(keys, index["key"])
+                assertEquals(BsonString("email_unique"), index["name"])
+                assertEquals(BsonBoolean(true), index["unique"])
+                reply(createIndexes, BsonDocument("ok" to BsonDouble(1.0)))
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                val result =
+                    client
+                        .database("library")
+                        .collection("books")
+                        .createIndex(keys = keys, name = "email_unique", unique = true)
+                assertEquals("email_unique", result)
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
+    fun createIndexRejectsEmptyKeys() = runTest {
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                val failure =
+                    assertFailsWith<IllegalArgumentException> {
+                        client.database("library").collection("books").createIndex(BsonDocument())
+                    }
+                assertEquals("createIndex requires at least one key", failure.message)
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
+    fun createIndexFailsOnCommandFailure() = runTest {
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                val createIndexes = receive()
+                reply(
+                    createIndexes,
+                    BsonDocument(
+                        "ok" to BsonDouble(0.0),
+                        "code" to BsonInt32(85),
+                        "errmsg" to BsonString("index options conflict")
+                    )
+                )
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                assertFailsWith<MongoCommandException> {
+                    client.database("library").collection("books").createIndex(BsonDocument("name" to BsonInt32(1)))
+                }
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
+    fun listIndexNamesUsesGetMoreWhenCursorRemainsOpen() = runTest {
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                val listIndexes = receive()
+                assertEquals(listOf("listIndexes", "\$db"), listIndexes.body.values.keys.toList())
+                assertEquals(BsonString("books"), listIndexes.body["listIndexes"])
+                assertEquals(BsonString("library"), listIndexes.body["\$db"])
+                reply(
+                    listIndexes,
+                    BsonDocument(
+                        "cursor" to
+                            BsonDocument(
+                                "id" to BsonInt64(987),
+                                "ns" to BsonString("library.books"),
+                                "firstBatch" to
+                                    BsonArray(
+                                        listOf(
+                                            BsonDocument("name" to BsonString("_id_")),
+                                            BsonDocument("name" to BsonString("name_1"))
+                                        )
+                                    )
+                            ),
+                        "ok" to BsonDouble(1.0)
+                    )
+                )
+
+                val getMore = receive()
+                assertEquals(listOf("getMore", "collection", "\$db"), getMore.body.values.keys.toList())
+                assertEquals(BsonInt64(987), getMore.body["getMore"])
+                assertEquals(BsonString("books"), getMore.body["collection"])
+                assertEquals(BsonString("library"), getMore.body["\$db"])
+                reply(
+                    getMore,
+                    BsonDocument(
+                        "cursor" to
+                            BsonDocument(
+                                "id" to BsonInt64(0),
+                                "ns" to BsonString("library.books"),
+                                "nextBatch" to BsonArray(listOf(BsonDocument("name" to BsonString("age_-1"))))
+                            ),
+                        "ok" to BsonDouble(1.0)
+                    )
+                )
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                val result = client.database("library").collection("books").listIndexNames()
+                assertEquals(listOf("_id_", "name_1", "age_-1"), result)
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
+    fun listIndexNamesFailsOnCommandFailure() = runTest {
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                val listIndexes = receive()
+                reply(
+                    listIndexes,
+                    BsonDocument(
+                        "ok" to BsonDouble(0.0),
+                        "code" to BsonInt32(13),
+                        "errmsg" to BsonString("not authorized")
+                    )
+                )
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                assertFailsWith<MongoCommandException> {
+                    client.database("library").collection("books").listIndexNames()
+                }
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
+    fun dropIndexSendsDropIndexesCommand() = runTest {
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                val dropIndexes = receive()
+                assertEquals(listOf("dropIndexes", "index", "\$db"), dropIndexes.body.values.keys.toList())
+                assertEquals(BsonString("books"), dropIndexes.body["dropIndexes"])
+                assertEquals(BsonString("name_1"), dropIndexes.body["index"])
+                assertEquals(BsonString("library"), dropIndexes.body["\$db"])
+                reply(
+                    dropIndexes,
+                    BsonDocument(
+                        "nIndexesWas" to BsonInt32(2),
+                        "ok" to BsonDouble(1.0)
+                    )
+                )
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                val result = client.database("library").collection("books").dropIndex("name_1")
+                assertEquals(1.0, result.ok)
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
+    fun dropIndexRejectsBlankName() = runTest {
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                assertFailsWith<IllegalArgumentException> {
+                    client.database("library").collection("books").dropIndex(" ")
+                }
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
     fun findOneSendsFindCommandAndReturnsFirstBatchDocument() = runTest {
         val filter = BsonDocument("name" to BsonString("Ada"))
         val found =

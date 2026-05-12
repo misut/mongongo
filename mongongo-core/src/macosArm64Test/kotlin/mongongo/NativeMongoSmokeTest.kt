@@ -188,6 +188,66 @@ class NativeMongoSmokeTest {
     }
 
     @Test
+    fun runsIndexCommandsAgainstFakeOpMsgServer() = runTest {
+        val keys = BsonDocument("title" to BsonInt32(1))
+
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                val createIndexes = receive()
+                assertEquals(BsonString("native_books"), createIndexes.body["createIndexes"])
+                assertEquals(BsonString("native_library"), createIndexes.body["\$db"])
+                val index =
+                    (createIndexes.body["indexes"] as BsonArray)
+                        .values
+                        .single() as BsonDocument
+                assertEquals(keys, index["key"])
+                assertEquals(BsonString("title_1"), index["name"])
+                assertNull(index["unique"])
+                reply(createIndexes, BsonDocument("ok" to BsonDouble(1.0)))
+
+                val listIndexes = receive()
+                assertEquals(BsonString("native_books"), listIndexes.body["listIndexes"])
+                assertEquals(BsonString("native_library"), listIndexes.body["\$db"])
+                reply(
+                    listIndexes,
+                    BsonDocument(
+                        "cursor" to
+                            BsonDocument(
+                                "id" to BsonInt64(0),
+                                "ns" to BsonString("native_library.native_books"),
+                                "firstBatch" to
+                                    BsonArray(
+                                        listOf(
+                                            BsonDocument("name" to BsonString("_id_")),
+                                            BsonDocument("name" to BsonString("title_1"))
+                                        )
+                                    )
+                            ),
+                        "ok" to BsonDouble(1.0)
+                    )
+                )
+
+                val dropIndexes = receive()
+                assertEquals(BsonString("native_books"), dropIndexes.body["dropIndexes"])
+                assertEquals(BsonString("title_1"), dropIndexes.body["index"])
+                assertEquals(BsonString("native_library"), dropIndexes.body["\$db"])
+                reply(dropIndexes, BsonDocument("ok" to BsonDouble(1.0)))
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                val collection = client.database("native_library").collection("native_books")
+                assertEquals("title_1", collection.createIndex(keys))
+                assertEquals(listOf("_id_", "title_1"), collection.listIndexNames())
+                assertEquals(1.0, collection.dropIndex("title_1").ok)
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
     fun insertsAgainstFakeOpMsgServer() = runTest {
         withFakeMongoServer(
             handler = {
@@ -503,6 +563,23 @@ class NativeMongoSmokeTest {
             assertTrue(collectionName in database.listCollectionNames())
             assertEquals(1.0, database.collection(collectionName).drop().ok)
             assertTrue(collectionName !in database.listCollectionNames())
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun createsListsAndDropsIndexConfiguredMongoUri() = runTest {
+        val uri = environment("MONGONGO_TEST_URI") ?: return@runTest
+        val collectionName = "index_commands_${Random.nextInt(0, Int.MAX_VALUE)}"
+        val indexName = "name_1"
+        val client = MongoClient.connect(uri)
+        try {
+            val collection = client.database("mongongo_native_smoke").collection(collectionName)
+            assertEquals(indexName, collection.createIndex(BsonDocument("name" to BsonInt32(1))))
+            assertTrue(indexName in collection.listIndexNames())
+            assertEquals(1.0, collection.dropIndex(indexName).ok)
+            assertTrue(indexName !in collection.listIndexNames())
         } finally {
             client.close()
         }

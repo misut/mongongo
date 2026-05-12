@@ -385,6 +385,66 @@ public class MongoClient private constructor(
             )
         )
 
+    internal suspend fun createIndex(
+        database: String,
+        collection: String,
+        keys: BsonDocument,
+        name: String?,
+        unique: Boolean
+    ): String {
+        require(!keys.isEmpty()) { "createIndex requires at least one key" }
+
+        val indexName = name ?: keys.generatedIndexName()
+        val index = linkedMapOf<String, BsonValue>()
+        index["key"] = keys
+        index["name"] = BsonString(indexName)
+        if (unique) {
+            index["unique"] = BsonBoolean(true)
+        }
+
+        runCommand(
+            BsonDocument(
+                "createIndexes" to BsonString(collection),
+                "indexes" to BsonArray(listOf(BsonDocument(index))),
+                "\$db" to BsonString(database)
+            )
+        )
+        return indexName
+    }
+
+    internal suspend fun listIndexNames(database: String, collection: String): List<String> {
+        val result =
+            runCommand(
+                BsonDocument(
+                    "listIndexes" to BsonString(collection),
+                    "\$db" to BsonString(database)
+                )
+            )
+        val batch = result.raw.cursorBatch("firstBatch")
+        val cursor =
+            MongoCursor(
+                client = this,
+                database = database,
+                collection = collection,
+                initialCursorId = batch.id,
+                initialBatch = batch.documents
+            )
+        return cursor.toList().map { document ->
+            document.getString("name") ?: error("MongoDB listIndexes response document did not contain string name")
+        }
+    }
+
+    internal suspend fun dropIndex(database: String, collection: String, name: String): MongoCommandResult {
+        require(name.isNotBlank()) { "MongoDB index name cannot be blank" }
+        return runCommand(
+            BsonDocument(
+                "dropIndexes" to BsonString(collection),
+                "index" to BsonString(name),
+                "\$db" to BsonString(database)
+            )
+        )
+    }
+
     internal suspend fun findOne(database: String, collection: String, filter: BsonDocument): BsonDocument? {
         val result =
             runCommand(
@@ -653,6 +713,25 @@ public class MongoCollection internal constructor(
 
     public suspend fun drop(): MongoCommandResult =
         database.client.dropCollection(database = database.name, collection = name)
+
+    public suspend fun createIndex(
+        keys: BsonDocument,
+        name: String? = null,
+        unique: Boolean = false
+    ): String =
+        database.client.createIndex(
+            database = database.name,
+            collection = this.name,
+            keys = keys,
+            name = name,
+            unique = unique
+        )
+
+    public suspend fun listIndexNames(): List<String> =
+        database.client.listIndexNames(database = database.name, collection = name)
+
+    public suspend fun dropIndex(name: String): MongoCommandResult =
+        database.client.dropIndex(database = database.name, collection = this.name, name = name)
 }
 
 private fun BsonDocument.toServerDescription(): MongoServerDescription =
@@ -694,6 +773,18 @@ private fun BsonDocument.cursorBatch(batchName: String): MongoCursorBatch {
         }
     return MongoCursorBatch(id = cursorId, documents = documents)
 }
+
+private fun BsonDocument.generatedIndexName(): String =
+    values.entries.joinToString("_") { (name, value) -> "${name}_${value.indexNameValue()}" }
+
+private fun BsonValue.indexNameValue(): String =
+    when (this) {
+        is BsonDouble -> value.toInt().toString()
+        is BsonInt32 -> value.toString()
+        is BsonInt64 -> value.toInt().toString()
+        is BsonString -> value.replace(' ', '_')
+        else -> ""
+    }
 
 private fun requireUpdateOperatorDocument(update: BsonDocument, operation: String) {
     val firstField = update.values.keys.firstOrNull()
