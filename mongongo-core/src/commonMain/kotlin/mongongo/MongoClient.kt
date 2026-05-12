@@ -149,7 +149,24 @@ public class MongoClient private constructor(
         return InsertManyResult(acknowledged = true, insertedIds = insertedIds, raw = result.raw)
     }
 
-    internal suspend fun deleteOne(database: String, collection: String, filter: BsonDocument): DeleteResult {
+    internal suspend fun deleteOne(database: String, collection: String, filter: BsonDocument): DeleteResult =
+        delete(database = database, collection = collection, filter = filter, limit = 1, ordered = true)
+
+    internal suspend fun deleteMany(
+        database: String,
+        collection: String,
+        filter: BsonDocument,
+        ordered: Boolean
+    ): DeleteResult =
+        delete(database = database, collection = collection, filter = filter, limit = 0, ordered = ordered)
+
+    private suspend fun delete(
+        database: String,
+        collection: String,
+        filter: BsonDocument,
+        limit: Int,
+        ordered: Boolean
+    ): DeleteResult {
         val result =
             runCommand(
                 BsonDocument(
@@ -159,11 +176,11 @@ public class MongoClient private constructor(
                             listOf(
                                 BsonDocument(
                                     "q" to filter,
-                                    "limit" to BsonInt32(1)
+                                    "limit" to BsonInt32(limit)
                                 )
                             )
                         ),
-                    "ordered" to BsonBoolean(true),
+                    "ordered" to BsonBoolean(ordered),
                     "\$db" to BsonString(database)
                 )
             )
@@ -508,6 +525,9 @@ public class MongoCollection internal constructor(
 
     public suspend fun deleteOne(filter: BsonDocument): DeleteResult =
         database.client.deleteOne(database = database.name, collection = name, filter = filter)
+
+    public suspend fun deleteMany(filter: BsonDocument, ordered: Boolean = true): DeleteResult =
+        database.client.deleteMany(database = database.name, collection = name, filter = filter, ordered = ordered)
 
     public suspend fun updateOne(
         filter: BsonDocument,

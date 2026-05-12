@@ -193,6 +193,38 @@ class EmbedMongoTest {
     }
 
     @Test
+    fun deletesManyDocumentsWithMongongoClientAndVerifiesWithJvmDriver() = runTest {
+        val databaseName = "mongongo_test"
+        val collectionName = "delete_many_${Random.nextInt(0, Int.MAX_VALUE)}"
+        val client = MongoClient.connect(shardedEmbedMongoCluster.connectionString.connectionString)
+        try {
+            val collection = client.database(databaseName).collection(collectionName)
+            collection.insertMany(
+                listOf(
+                    BsonDocument("name" to BsonString("Ada"), "status" to BsonString("remove")),
+                    BsonDocument("name" to BsonString("Grace"), "status" to BsonString("remove")),
+                    BsonDocument("name" to BsonString("Linus"), "status" to BsonString("keep"))
+                )
+            )
+
+            val deleteResult = collection.deleteMany(BsonDocument("status" to BsonString("remove")), ordered = false)
+            assertEquals(2L, deleteResult.deletedCount)
+
+            val found = collection.find().toList()
+            assertEquals(listOf("Linus"), found.map { it.stringValue("name") })
+        } finally {
+            client.close()
+        }
+
+        syncClient.use { verifier ->
+            val collection = verifier.getDatabase(databaseName).getCollection<Document>(collectionName)
+            assertEquals(1L, collection.countDocuments(Document()))
+            assertEquals(0L, collection.countDocuments(Document("status", "remove")))
+            assertEquals(1L, collection.countDocuments(Document("status", "keep")))
+        }
+    }
+
+    @Test
     fun updatesDocumentWithMongongoClientAndVerifiesWithJvmDriver() = runTest {
         val databaseName = "mongongo_test"
         val collectionName = "update_one_${Random.nextInt(0, Int.MAX_VALUE)}"
