@@ -169,6 +169,48 @@ class NativeMongoSmokeTest {
     }
 
     @Test
+    fun insertsManyAgainstFakeOpMsgServer() = runTest {
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                val insert = receive()
+                assertEquals(BsonString("native_books"), insert.body["insert"])
+                assertEquals(BsonBoolean(false), insert.body["ordered"])
+                assertEquals(BsonString("native_library"), insert.body["\$db"])
+                val documents = insert.body["documents"] as BsonArray
+                assertEquals(2, documents.values.size)
+                val first = documents.values[0] as BsonDocument
+                val second = documents.values[1] as BsonDocument
+                assertTrue(first["_id"] is BsonObjectId)
+                assertTrue(second["_id"] is BsonObjectId)
+                assertEquals(BsonString("Ada"), first["name"])
+                assertEquals(BsonString("Grace"), second["name"])
+                reply(insert, BsonDocument("ok" to BsonDouble(1.0), "n" to BsonInt32(2)))
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                val result =
+                    client
+                        .database("native_library")
+                        .collection("native_books")
+                        .insertMany(
+                            listOf(
+                                BsonDocument("name" to BsonString("Ada")),
+                                BsonDocument("name" to BsonString("Grace"))
+                            ),
+                            ordered = false
+                        )
+                assertEquals(2, result.insertedIds.size)
+                assertTrue(result.insertedIds[0] is BsonObjectId)
+                assertTrue(result.insertedIds[1] is BsonObjectId)
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
     fun deletesAgainstFakeOpMsgServer() = runTest {
         val filter = BsonDocument("name" to BsonString("Ada"))
 
@@ -376,6 +418,30 @@ class NativeMongoSmokeTest {
             for (name in expectedNames) {
                 collection.insertOne(BsonDocument("name" to BsonString(name)))
             }
+
+            val found = collection.find().toList()
+            assertEquals(expectedNames, found.map { it.stringValue("name") }.toSet())
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun insertsManyAndFindsConfiguredMongoUri() = runTest {
+        val uri = environment("MONGONGO_TEST_URI") ?: return@runTest
+        val expectedNames = setOf("native-insert-many-a", "native-insert-many-b", "native-insert-many-c")
+        val client = MongoClient.connect(uri)
+        try {
+            val collection =
+                client
+                    .database("mongongo_native_smoke")
+                    .collection("insert_many_${Random.nextInt(0, Int.MAX_VALUE)}")
+            val result =
+                collection.insertMany(
+                    expectedNames.map { name -> BsonDocument("name" to BsonString(name)) },
+                    ordered = false
+                )
+            assertEquals(3, result.insertedIds.size)
 
             val found = collection.find().toList()
             assertEquals(expectedNames, found.map { it.stringValue("name") }.toSet())

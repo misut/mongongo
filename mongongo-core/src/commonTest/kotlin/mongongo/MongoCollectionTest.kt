@@ -473,6 +473,231 @@ class MongoCollectionTest {
     }
 
     @Test
+    fun insertManyGeneratesObjectIdsAndSendsInsertCommand() = runTest {
+        var sentDocuments = emptyList<BsonDocument>()
+        val first = BsonDocument("name" to BsonString("Ada"))
+        val second = BsonDocument("name" to BsonString("Grace"))
+
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                val insert = receive()
+                assertEquals(listOf("insert", "documents", "ordered", "\$db"), insert.body.values.keys.toList())
+                assertEquals(BsonString("books"), insert.body["insert"])
+                assertEquals(BsonBoolean(true), insert.body["ordered"])
+                assertEquals(BsonString("library"), insert.body["\$db"])
+
+                val documents = insert.body["documents"].asBson<BsonArray>()
+                assertEquals(2, documents.values.size)
+                val sentFirst = documents.values[0].asBson<BsonDocument>()
+                val sentSecond = documents.values[1].asBson<BsonDocument>()
+                val firstId = sentFirst["_id"].asBson<BsonObjectId>()
+                val secondId = sentSecond["_id"].asBson<BsonObjectId>()
+                assertEquals(12, firstId.bytes.size)
+                assertEquals(12, secondId.bytes.size)
+                assertEquals(BsonString("Ada"), sentFirst["name"])
+                assertEquals(BsonString("Grace"), sentSecond["name"])
+                sentDocuments = listOf(sentFirst, sentSecond)
+
+                reply(insert, BsonDocument("ok" to BsonDouble(1.0), "n" to BsonInt32(2)))
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                val result = client.database("library").collection("books").insertMany(listOf(first, second))
+                assertTrue(result.acknowledged)
+                assertEquals(sentDocuments[0]["_id"], result.insertedIds[0])
+                assertEquals(sentDocuments[1]["_id"], result.insertedIds[1])
+                assertNull(first["_id"])
+                assertNull(second["_id"])
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
+    fun insertManyKeepsExistingIds() = runTest {
+        val firstId = BsonString("first-id")
+        val secondId = BsonObjectId.fromHex("00112233445566778899aabb")
+        val first = BsonDocument("_id" to firstId, "name" to BsonString("Ada"))
+        val second = BsonDocument("_id" to secondId, "name" to BsonString("Grace"))
+
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                val insert = receive()
+                val documents = insert.body["documents"].asBson<BsonArray>()
+                assertEquals(listOf(first, second), documents.values)
+                reply(insert, BsonDocument("ok" to BsonDouble(1.0), "n" to BsonInt32(2)))
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                val result = client.database("library").collection("books").insertMany(listOf(first, second))
+                assertTrue(result.acknowledged)
+                assertEquals(linkedMapOf(0 to firstId, 1 to secondId), result.insertedIds)
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
+    fun insertManyRejectsEmptyDocumentList() = runTest {
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                val failure =
+                    assertFailsWith<IllegalArgumentException> {
+                        client.database("library").collection("books").insertMany(emptyList())
+                    }
+                assertEquals("insertMany requires at least one document", failure.message)
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
+    fun insertManySendsOrderedFalse() = runTest {
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                val insert = receive()
+                assertEquals(BsonBoolean(false), insert.body["ordered"])
+                reply(insert, BsonDocument("ok" to BsonDouble(1.0), "n" to BsonInt32(1)))
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                val result =
+                    client
+                        .database("library")
+                        .collection("books")
+                        .insertMany(listOf(BsonDocument("name" to BsonString("Ada"))), ordered = false)
+                assertTrue(result.acknowledged)
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
+    fun insertManyFailsOnCommandFailure() = runTest {
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                val insert = receive()
+                reply(
+                    insert,
+                    BsonDocument(
+                        "ok" to BsonDouble(0.0),
+                        "code" to BsonInt32(13),
+                        "errmsg" to BsonString("unauthorized")
+                    )
+                )
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                assertFailsWith<MongoCommandException> {
+                    client.database("library").collection("books").insertMany(listOf(BsonDocument()))
+                }
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
+    fun insertManyFailsOnWriteErrors() = runTest {
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                val insert = receive()
+                reply(
+                    insert,
+                    BsonDocument(
+                        "ok" to BsonDouble(1.0),
+                        "n" to BsonInt32(1),
+                        "writeErrors" to
+                            BsonArray(
+                                listOf(
+                                    BsonDocument(
+                                        "index" to BsonInt32(1),
+                                        "code" to BsonInt32(11_000),
+                                        "errmsg" to BsonString("duplicate key")
+                                    )
+                                )
+                            )
+                    )
+                )
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                assertFailsWith<MongoWriteException> {
+                    client
+                        .database("library")
+                        .collection("books")
+                        .insertMany(
+                            listOf(
+                                BsonDocument("name" to BsonString("Ada")),
+                                BsonDocument("name" to BsonString("Ada"))
+                            )
+                        )
+                }
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
+    fun insertManyFailsOnWriteConcernError() = runTest {
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                val insert = receive()
+                reply(
+                    insert,
+                    BsonDocument(
+                        "ok" to BsonDouble(1.0),
+                        "n" to BsonInt32(2),
+                        "writeConcernError" to
+                            BsonDocument(
+                                "code" to BsonInt32(64),
+                                "errmsg" to BsonString("write concern failed")
+                            )
+                    )
+                )
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                assertFailsWith<MongoWriteException> {
+                    client
+                        .database("library")
+                        .collection("books")
+                        .insertMany(
+                            listOf(
+                                BsonDocument("name" to BsonString("Ada")),
+                                BsonDocument("name" to BsonString("Grace"))
+                            )
+                        )
+                }
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
     fun deleteOneSendsDeleteCommandAndReturnsDeletedCount() = runTest {
         val filter = BsonDocument("name" to BsonString("Ada"))
 

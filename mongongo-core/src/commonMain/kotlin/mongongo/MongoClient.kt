@@ -17,6 +17,12 @@ public data class InsertOneResult(
     val raw: BsonDocument
 )
 
+public data class InsertManyResult(
+    val acknowledged: Boolean,
+    val insertedIds: Map<Int, BsonValue>,
+    val raw: BsonDocument
+)
+
 public data class DeleteResult(
     val acknowledged: Boolean,
     val deletedCount: Long,
@@ -103,21 +109,44 @@ public class MongoClient private constructor(
     }
 
     internal suspend fun insertOne(database: String, collection: String, document: BsonDocument): InsertOneResult {
-        val existingId = document["_id"]
-        val insertedId = existingId ?: BsonObjectId.generate()
-        val documentToInsert = if (existingId == null) document.withValue("_id", insertedId) else document
+        val result =
+            insertMany(
+                database = database,
+                collection = collection,
+                documents = listOf(document),
+                ordered = true
+            )
+        return InsertOneResult(acknowledged = result.acknowledged, insertedId = result.insertedIds[0], raw = result.raw)
+    }
+
+    internal suspend fun insertMany(
+        database: String,
+        collection: String,
+        documents: List<BsonDocument>,
+        ordered: Boolean
+    ): InsertManyResult {
+        require(documents.isNotEmpty()) { "insertMany requires at least one document" }
+
+        val insertedIds = linkedMapOf<Int, BsonValue>()
+        val documentsToInsert =
+            documents.mapIndexed { index, document ->
+                val existingId = document["_id"]
+                val insertedId = existingId ?: BsonObjectId.generate()
+                insertedIds[index] = insertedId
+                if (existingId == null) document.withValue("_id", insertedId) else document
+            }
         val result =
             runCommand(
                 BsonDocument(
                     "insert" to BsonString(collection),
-                    "documents" to BsonArray(listOf(documentToInsert)),
-                    "ordered" to BsonBoolean(true),
+                    "documents" to BsonArray(documentsToInsert),
+                    "ordered" to BsonBoolean(ordered),
                     "\$db" to BsonString(database)
                 )
             )
 
         result.raw.throwIfWriteFailed()
-        return InsertOneResult(acknowledged = true, insertedId = insertedId, raw = result.raw)
+        return InsertManyResult(acknowledged = true, insertedIds = insertedIds, raw = result.raw)
     }
 
     internal suspend fun deleteOne(database: String, collection: String, filter: BsonDocument): DeleteResult {
@@ -473,6 +502,9 @@ public class MongoCollection internal constructor(
 
     public suspend fun insertOne(document: BsonDocument): InsertOneResult =
         database.client.insertOne(database = database.name, collection = name, document = document)
+
+    public suspend fun insertMany(documents: List<BsonDocument>, ordered: Boolean = true): InsertManyResult =
+        database.client.insertMany(database = database.name, collection = name, documents = documents, ordered = ordered)
 
     public suspend fun deleteOne(filter: BsonDocument): DeleteResult =
         database.client.deleteOne(database = database.name, collection = name, filter = filter)

@@ -92,6 +92,40 @@ class EmbedMongoTest {
     }
 
     @Test
+    fun insertsManyDocumentsWithMongongoClientAndVerifiesWithJvmDriver() = runTest {
+        val databaseName = "mongongo_test"
+        val collectionName = "insert_many_${Random.nextInt(0, Int.MAX_VALUE)}"
+        val expectedNames = setOf("Ada", "Grace", "Linus")
+        val client = MongoClient.connect(shardedEmbedMongoCluster.connectionString.connectionString)
+        try {
+            val collection = client.database(databaseName).collection(collectionName)
+            val result =
+                collection.insertMany(
+                    listOf(
+                        BsonDocument("name" to BsonString("Ada")),
+                        BsonDocument("name" to BsonString("Grace")),
+                        BsonDocument("name" to BsonString("Linus"))
+                    )
+                )
+            assertEquals(3, result.insertedIds.size)
+            assertIs<BsonObjectId>(result.insertedIds[0])
+            assertIs<BsonObjectId>(result.insertedIds[1])
+            assertIs<BsonObjectId>(result.insertedIds[2])
+
+            val found = collection.find().toList()
+            assertEquals(expectedNames, found.map { it.stringValue("name") }.toSet())
+        } finally {
+            client.close()
+        }
+
+        syncClient.use { verifier ->
+            val collection = verifier.getDatabase(databaseName).getCollection<Document>(collectionName)
+            assertEquals(3L, collection.countDocuments(Document()))
+            assertEquals(expectedNames, collection.find().toList().map { it.getString("name") }.toSet())
+        }
+    }
+
+    @Test
     fun findsDocumentInsertedWithMongongoClientAndVerifiesWithJvmDriver() = runTest {
         val databaseName = "mongongo_test"
         val collectionName = "find_one_${Random.nextInt(0, Int.MAX_VALUE)}"
