@@ -2,9 +2,10 @@
 
 mongongo is a MongoDB client for Kotlin/Native and Kotlin Multiplatform.
 
-The current implementation is an early BSON-first client. It is useful for
-trying basic MongoDB commands from common Kotlin code, but it is not a full
-replacement for the official MongoDB drivers yet.
+The current implementation is an early v0 client with a BSON-first core and
+ergonomic helpers for common CRUD usage. It is useful for trying MongoDB from
+common Kotlin code, but it is not a full replacement for the official MongoDB
+drivers yet.
 
 ## Supported targets
 
@@ -28,6 +29,7 @@ Run `macosArm64Test` on a macOS Arm64 host.
 | Sessions | explicit `startSession`, `withSession`, and session-bound databases/collections |
 | Transactions | explicit `startTransaction`, `withTransaction`, `commit`, and `abort` |
 | Typed serialization | kotlinx.serialization v0 for data classes with a small BSON mapping |
+| BSON DSLs | filter, update, and document builder helpers for common CRUD calls |
 
 Unsupported or limited in this v0 surface:
 
@@ -110,22 +112,25 @@ Reference:
 
 All client operations are suspending. Close the client when finished.
 
-### insertOne and findOne
+### BSON-first CRUD with DSL helpers
 
 ```kotlin
-import mongongo.BsonDocument
 import mongongo.BsonObjectId
-import mongongo.BsonString
 import mongongo.MongoClient
 
 suspend fun insertAndFindOne() {
     val client = MongoClient.connect("mongodb://127.0.0.1:27017")
     try {
         val collection = client.database("mongongo_example").collection("books")
-        val insert = collection.insertOne(BsonDocument("title" to BsonString("The Left Hand of Darkness")))
+        val insert =
+            collection.insertOne {
+                value("title", "The Left Hand of Darkness")
+                value("year", 1969)
+                value("tags", listOf("sf", "classic"))
+            }
         val id = insert.insertedId as BsonObjectId
 
-        val found = collection.findOne(BsonDocument("_id" to id))
+        val found = collection.findOne { "_id" eq id }
         check(found?.getString("title") == "The Left Hand of Darkness")
     } finally {
         client.close()
@@ -133,12 +138,12 @@ suspend fun insertAndFindOne() {
 }
 ```
 
-### insertMany and cursor find
+Use `filter { ... }` when a method already takes a `BsonDocument` filter, or pass
+a trailing filter block to the collection methods that provide one.
 
 ```kotlin
-import mongongo.BsonDocument
-import mongongo.BsonString
 import mongongo.MongoClient
+import mongongo.bsonDocument
 
 suspend fun insertAndFindMany() {
     val client = MongoClient.connect("mongodb://127.0.0.1:27017")
@@ -146,18 +151,26 @@ suspend fun insertAndFindMany() {
         val collection = client.database("mongongo_example").collection("books")
         collection.insertMany(
             listOf(
-                BsonDocument("title" to BsonString("Parable of the Sower")),
-                BsonDocument("title" to BsonString("A Wizard of Earthsea"))
+                bsonDocument { value("title", "Parable of the Sower") },
+                bsonDocument { value("title", "A Wizard of Earthsea") }
             )
         )
 
-        val documents = collection.find().toList()
+        val documents =
+            collection
+                .find(limit = 10, batchSize = 5) {
+                    "title" inList listOf("Parable of the Sower", "A Wizard of Earthsea")
+                }
+                .toList()
         check(documents.size >= 2)
     } finally {
         client.close()
     }
 }
 ```
+
+The filter DSL supports equality, `ne`, `gt`, `gte`, `lt`, `lte`, `inList`,
+`nin`, `and`, `or`, and document-level `not { ... }`.
 
 ### typed serialization v0
 
@@ -169,12 +182,15 @@ kotlinx.serialization. The v0 mapping supports `String`, `Int`, `Long`,
 ```kotlin
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import mongongo.BsonObjectId
 import mongongo.MongoClient
 
 @Serializable
 data class Book(
-    @SerialName("book_title")
+    @SerialName("_id")
+    val id: BsonObjectId? = null,
     val title: String,
+    val status: String = "draft",
     val tags: List<String> = emptyList()
 )
 
@@ -183,7 +199,7 @@ suspend fun insertAndFindTypedBook() {
     try {
         val collection = client.database("mongongo_example").typedCollection<Book>("typed_books")
         collection.insertOne(Book(title = "Dawn", tags = listOf("sf")))
-        check(collection.findOne()?.title == "Dawn")
+        check(collection.findOne { Book::title eq "Dawn" }?.title == "Dawn")
     } finally {
         client.close()
     }
@@ -197,28 +213,113 @@ serialization exception. Missing default-valued fields decode through the
 generated serializer defaults; unknown BSON fields such as MongoDB-generated
 `_id` are ignored when the target serializer has no matching property.
 
-### updateOne with `$set`
+Typed property filters currently use the Kotlin property name, so
+`Book::title eq "Dawn"` maps to `{ "title": "Dawn" }`. Use string field names
+when you need serializer-driven names from `@SerialName` until typed filter
+field-name mapping is added.
+
+### update DSL
 
 ```kotlin
-import mongongo.BsonDocument
 import mongongo.BsonObjectId
-import mongongo.BsonString
 import mongongo.MongoClient
+import mongongo.filter
+import mongongo.update
 
 suspend fun updateOneBook() {
     val client = MongoClient.connect("mongodb://127.0.0.1:27017")
     try {
         val collection = client.database("mongongo_example").collection("books")
-        val insert = collection.insertOne(BsonDocument("title" to BsonString("Draft"), "status" to BsonString("new")))
+        val insert =
+            collection.insertOne {
+                value("title", "Draft")
+                value("status", "new")
+            }
         val id = insert.insertedId as BsonObjectId
 
         collection.updateOne(
-            filter = BsonDocument("_id" to id),
-            update = BsonDocument("\$set" to BsonDocument("status" to BsonString("published")))
+            filter { "_id" eq id },
+            update {
+                set("status", "published")
+                inc("revision", 1)
+                addToSet("tags", "released")
+            }
         )
 
-        val found = collection.findOne(BsonDocument("_id" to id))
+        val found = collection.findOne { "_id" eq id }
         check(found?.getString("status") == "published")
+    } finally {
+        client.close()
+    }
+}
+```
+
+Update DSL blocks always create operator update documents such as
+`{ "$set": ... }`. Replacement writes remain explicit through `replaceOne` and
+still reject operator documents.
+
+### Sessions and transactions with typed collections
+
+```kotlin
+import kotlinx.serialization.Serializable
+import mongongo.MongoClient
+
+@Serializable
+data class TransactionBook(
+    val title: String,
+    val status: String = "draft"
+)
+
+suspend fun publishInTransaction() {
+    val client = MongoClient.connect("mongodb://127.0.0.1:27017/?replicaSet=rs0")
+    try {
+        client.withSession {
+            val sessionBooks =
+                database("mongongo_example").typedCollection<TransactionBook>("session_books")
+            sessionBooks.insertOne(TransactionBook(title = "Kindred"))
+            check(sessionBooks.findOne { TransactionBook::title eq "Kindred" } != null)
+        }
+
+        client.withTransaction {
+            val books = database("mongongo_example").typedCollection<TransactionBook>("transaction_books")
+            books.insertOne(TransactionBook(title = "The Dispossessed"))
+            books.updateOne(
+                filter = { TransactionBook::title eq "The Dispossessed" },
+                update = { set("status", "published") }
+            )
+        }
+    } finally {
+        client.close()
+    }
+}
+```
+
+### Raw BSON escape hatch
+
+The DSLs are convenience helpers. The stable escape hatch is still direct
+`BsonDocument` / `BsonValue` usage for commands or operators that do not have a
+dedicated helper yet.
+
+```kotlin
+import mongongo.BsonDocument
+import mongongo.BsonString
+import mongongo.MongoClient
+
+suspend fun rawBsonFind() {
+    val client = MongoClient.connect("mongodb://127.0.0.1:27017")
+    try {
+        val collection = client.database("mongongo_example").collection("books")
+        val found =
+            collection.findOne(
+                BsonDocument(
+                    "title" to
+                        BsonDocument(
+                            "\$regex" to BsonString("^Dune"),
+                            "\$options" to BsonString("i")
+                        )
+                )
+            )
+        check(found?.getString("title")?.startsWith("Dune") != false)
     } finally {
         client.close()
     }
@@ -240,54 +341,6 @@ suspend fun createListAndDropIndex() {
 
         check(indexName in collection.listIndexNames())
         collection.dropIndex(indexName)
-    } finally {
-        client.close()
-    }
-}
-```
-
-### Sessions
-
-Use `withSession` when several operations should share the same logical session.
-Inside the block, get databases and collections from the session receiver.
-
-```kotlin
-import mongongo.BsonDocument
-import mongongo.BsonString
-import mongongo.MongoClient
-
-suspend fun insertInSession() {
-    val client = MongoClient.connect("mongodb://127.0.0.1:27017")
-    try {
-        client.withSession {
-            val collection = database("mongongo_example").collection("session_books")
-            collection.insertOne(BsonDocument("title" to BsonString("Kindred")))
-            check(collection.findOne(BsonDocument("title" to BsonString("Kindred"))) != null)
-        }
-    } finally {
-        client.close()
-    }
-}
-```
-
-### Transactions
-
-Use the transaction receiver to obtain databases and collections. This keeps all
-operations in the block bound to the same transaction context.
-
-```kotlin
-import mongongo.BsonDocument
-import mongongo.BsonString
-import mongongo.MongoClient
-
-suspend fun insertInTransaction() {
-    val client = MongoClient.connect("mongodb://127.0.0.1:27017/?replicaSet=rs0")
-    try {
-        client.withTransaction {
-            val collection = database("mongongo_example").collection("transaction_books")
-            collection.insertOne(BsonDocument("title" to BsonString("The Dispossessed")))
-            collection.insertOne(BsonDocument("title" to BsonString("The Lathe of Heaven")))
-        }
     } finally {
         client.close()
     }
@@ -324,9 +377,12 @@ MONGONGO_AUTH_TEST_URI='mongodb://user:p%40ssword@127.0.0.1:27017/app?authSource
 ## Design notes
 
 - The default public API works with `BsonDocument` and `BsonValue` types.
-  Typed `MongoCollection<T>` values can use either an explicit `MongoCodec<T>`
-  or the kotlinx.serialization BSON codec v0 for supported `@Serializable`
-  data classes.
+  The filter and update DSLs are additive helpers that produce ordinary BSON
+  documents; raw BSON remains the escape hatch for unsupported operators.
+- Typed `MongoCollection<T>` values can use either an explicit `MongoCodec<T>` or
+  the kotlinx.serialization BSON codec v0 for supported `@Serializable` data
+  classes. Typed property filters currently use Kotlin property names, not
+  serializer field-name mapping.
 - `commonMain` does not depend on the JVM MongoDB driver. The official JVM
   driver is used only in JVM tests for verification.
 - Commands are implemented over MongoDB OP_MSG.
