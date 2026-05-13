@@ -25,12 +25,16 @@ Run `macosArm64Test` on a macOS Arm64 host.
 | CRUD | `insertOne`, `insertMany`, `findOne`, cursor `find`, `deleteOne`, `deleteMany`, `updateOne`, `updateMany`, `replaceOne` |
 | Database helpers | `listCollectionNames`, `createCollection`, collection `drop` |
 | Index helpers | `createIndex`, `listIndexNames`, `dropIndex` |
+| Sessions | explicit `startSession`, `withSession`, and session-bound databases/collections |
+| Transactions | explicit `startTransaction`, `withTransaction`, `commit`, and `abort` |
 
 Unsupported or limited in this v0 surface:
 
-- sessions and transactions
 - connection pooling
 - retryable writes
+- transient transaction retries and unknown commit result retries
+- causal consistency `operationTime` / `$clusterTime` tracking
+- full server session pooling
 - change streams
 - aggregation
 - typed serialization
@@ -203,6 +207,54 @@ suspend fun createListAndDropIndex() {
 }
 ```
 
+### Sessions
+
+Use `withSession` when several operations should share the same logical session.
+Inside the block, get databases and collections from the session receiver.
+
+```kotlin
+import mongongo.BsonDocument
+import mongongo.BsonString
+import mongongo.MongoClient
+
+suspend fun insertInSession() {
+    val client = MongoClient.connect("mongodb://127.0.0.1:27017")
+    try {
+        client.withSession {
+            val collection = database("mongongo_example").collection("session_books")
+            collection.insertOne(BsonDocument("title" to BsonString("Kindred")))
+            check(collection.findOne(BsonDocument("title" to BsonString("Kindred"))) != null)
+        }
+    } finally {
+        client.close()
+    }
+}
+```
+
+### Transactions
+
+Use the transaction receiver to obtain databases and collections. This keeps all
+operations in the block bound to the same transaction context.
+
+```kotlin
+import mongongo.BsonDocument
+import mongongo.BsonString
+import mongongo.MongoClient
+
+suspend fun insertInTransaction() {
+    val client = MongoClient.connect("mongodb://127.0.0.1:27017/?replicaSet=rs0")
+    try {
+        client.withTransaction {
+            val collection = database("mongongo_example").collection("transaction_books")
+            collection.insertOne(BsonDocument("title" to BsonString("The Dispossessed")))
+            collection.insertOne(BsonDocument("title" to BsonString("The Lathe of Heaven")))
+        }
+    } finally {
+        client.close()
+    }
+}
+```
+
 ## Smoke tests
 
 The normal verification suite uses fake OP_MSG servers and embedded JVM MongoDB
@@ -243,6 +295,14 @@ MONGONGO_AUTH_TEST_URI='mongodb://user:p%40ssword@127.0.0.1:27017/app?authSource
 - The client uses one connection per `MongoClient` and serializes requests on
   that connection. It does not implement driver-grade topology monitoring or
   pooling yet.
+- `withTransaction` commits when the block completes and aborts when the block
+  throws, then rethrows the original exception. This v0 implementation does not
+  retry `TransientTransactionError` or `UnknownTransactionCommitResult` yet.
+- Sessions send `lsid` with session-bound commands. Transactions send `lsid`,
+  `txnNumber`, and `autocommit: false`; the first transaction operation also
+  sends `startTransaction: true`.
+- Causal consistency bookkeeping is not implemented yet: the client does not
+  track `operationTime`, gossip `$clusterTime`, or add `readConcern.afterClusterTime`.
 
 ## License
 

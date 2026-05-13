@@ -67,12 +67,13 @@ public class MongoClient private constructor(
     nextRequestId: Int
 ) {
     private val sendMutex = Mutex()
+    private val operationContext = MongoClientOperationContext(this)
     private var nextRequestId = nextRequestId
     private var closed = false
 
     public suspend fun ping(database: String = "admin"): MongoCommandResult {
         require(database.isNotBlank()) { "MongoDB database name cannot be blank" }
-        return runCommand(
+        return operationContext.runCommand(
             BsonDocument(
                 "ping" to BsonInt32(1),
                 "\$db" to BsonString(database)
@@ -82,7 +83,41 @@ public class MongoClient private constructor(
 
     public fun database(name: String): MongoDatabase {
         require(name.isNotBlank()) { "MongoDB database name cannot be blank" }
-        return MongoDatabase(client = this, name = name)
+        return MongoDatabase(context = operationContext, name = name)
+    }
+
+    public suspend fun startSession(): MongoSession {
+        val result =
+            operationContext.runCommand(
+                BsonDocument(
+                    "startSession" to BsonInt32(1),
+                    "\$db" to BsonString("admin")
+                )
+            )
+        val sessionId = result.raw.getDocument("id")
+            ?: error("MongoDB startSession response did not contain session id")
+        return MongoSession(client = this, sessionId = sessionId)
+    }
+
+    public suspend fun <R> withSession(block: suspend MongoSession.() -> R): R {
+        val session = startSession()
+        try {
+            return session.block()
+        } finally {
+            session.close()
+        }
+    }
+
+    public suspend fun <R> withTransaction(block: suspend MongoTransaction.() -> R): R =
+        withSession { withTransaction(block) }
+
+    internal suspend fun endSession(sessionId: BsonDocument) {
+        sendCommand(
+            BsonDocument(
+                "endSessions" to BsonArray(listOf(sessionId)),
+                "\$db" to BsonString("admin")
+            )
+        )
     }
 
     public suspend fun close() {
@@ -93,7 +128,7 @@ public class MongoClient private constructor(
         transport.close()
     }
 
-    private suspend fun runCommand(command: BsonDocument): MongoCommandResult {
+    internal suspend fun sendCommand(command: BsonDocument): MongoCommandResult {
         check(!closed) { "MongoClient is closed" }
 
         val raw =
@@ -108,9 +143,15 @@ public class MongoClient private constructor(
         return MongoCommandResult(ok = ok, raw = raw)
     }
 
-    internal suspend fun insertOne(database: String, collection: String, document: BsonDocument): InsertOneResult {
+    internal suspend fun insertOne(
+        context: MongoOperationContext,
+        database: String,
+        collection: String,
+        document: BsonDocument
+    ): InsertOneResult {
         val result =
             insertMany(
+                context = context,
                 database = database,
                 collection = collection,
                 documents = listOf(document),
@@ -120,6 +161,7 @@ public class MongoClient private constructor(
     }
 
     internal suspend fun insertMany(
+        context: MongoOperationContext,
         database: String,
         collection: String,
         documents: List<BsonDocument>,
@@ -136,7 +178,7 @@ public class MongoClient private constructor(
                 if (existingId == null) document.withValue("_id", insertedId) else document
             }
         val result =
-            runCommand(
+            context.runCommand(
                 BsonDocument(
                     "insert" to BsonString(collection),
                     "documents" to BsonArray(documentsToInsert),
@@ -149,18 +191,25 @@ public class MongoClient private constructor(
         return InsertManyResult(acknowledged = true, insertedIds = insertedIds, raw = result.raw)
     }
 
-    internal suspend fun deleteOne(database: String, collection: String, filter: BsonDocument): DeleteResult =
-        delete(database = database, collection = collection, filter = filter, limit = 1, ordered = true)
+    internal suspend fun deleteOne(
+        context: MongoOperationContext,
+        database: String,
+        collection: String,
+        filter: BsonDocument
+    ): DeleteResult =
+        delete(context = context, database = database, collection = collection, filter = filter, limit = 1, ordered = true)
 
     internal suspend fun deleteMany(
+        context: MongoOperationContext,
         database: String,
         collection: String,
         filter: BsonDocument,
         ordered: Boolean
     ): DeleteResult =
-        delete(database = database, collection = collection, filter = filter, limit = 0, ordered = ordered)
+        delete(context = context, database = database, collection = collection, filter = filter, limit = 0, ordered = ordered)
 
     private suspend fun delete(
+        context: MongoOperationContext,
         database: String,
         collection: String,
         filter: BsonDocument,
@@ -168,7 +217,7 @@ public class MongoClient private constructor(
         ordered: Boolean
     ): DeleteResult {
         val result =
-            runCommand(
+            context.runCommand(
                 BsonDocument(
                     "delete" to BsonString(collection),
                     "deletes" to
@@ -193,6 +242,7 @@ public class MongoClient private constructor(
     }
 
     internal suspend fun updateOne(
+        context: MongoOperationContext,
         database: String,
         collection: String,
         filter: BsonDocument,
@@ -201,6 +251,7 @@ public class MongoClient private constructor(
     ): UpdateResult {
         requireUpdateOperatorDocument(update, operation = "updateOne")
         return runUpdate(
+            context = context,
             database = database,
             collection = collection,
             filter = filter,
@@ -211,6 +262,7 @@ public class MongoClient private constructor(
     }
 
     internal suspend fun updateMany(
+        context: MongoOperationContext,
         database: String,
         collection: String,
         filter: BsonDocument,
@@ -219,6 +271,7 @@ public class MongoClient private constructor(
     ): UpdateResult {
         requireUpdateOperatorDocument(update, operation = "updateMany")
         return runUpdate(
+            context = context,
             database = database,
             collection = collection,
             filter = filter,
@@ -229,6 +282,7 @@ public class MongoClient private constructor(
     }
 
     internal suspend fun replaceOne(
+        context: MongoOperationContext,
         database: String,
         collection: String,
         filter: BsonDocument,
@@ -237,6 +291,7 @@ public class MongoClient private constructor(
     ): UpdateResult {
         requireReplacementDocument(replacement)
         return runUpdate(
+            context = context,
             database = database,
             collection = collection,
             filter = filter,
@@ -247,6 +302,7 @@ public class MongoClient private constructor(
     }
 
     private suspend fun runUpdate(
+        context: MongoOperationContext,
         database: String,
         collection: String,
         filter: BsonDocument,
@@ -255,7 +311,7 @@ public class MongoClient private constructor(
         upsert: Boolean
     ): UpdateResult {
         val result =
-            runCommand(
+            context.runCommand(
                 BsonDocument(
                     "update" to BsonString(collection),
                     "updates" to
@@ -291,6 +347,7 @@ public class MongoClient private constructor(
     }
 
     internal suspend fun find(
+        context: MongoOperationContext,
         database: String,
         collection: String,
         filter: BsonDocument,
@@ -311,10 +368,10 @@ public class MongoClient private constructor(
         }
         command["\$db"] = BsonString(database)
 
-        val result = runCommand(BsonDocument(command))
+        val result = context.runCommand(BsonDocument(command))
         val batch = result.raw.cursorBatch("firstBatch")
         return MongoCursor(
-            client = this,
+            context = context,
             database = database,
             collection = collection,
             initialCursorId = batch.id,
@@ -322,20 +379,30 @@ public class MongoClient private constructor(
         )
     }
 
-    internal suspend fun getMore(database: String, collection: String, cursorId: Long): MongoCursorBatch {
+    internal suspend fun getMore(
+        context: MongoOperationContext,
+        database: String,
+        collection: String,
+        cursorId: Long
+    ): MongoCursorBatch {
         val result =
-            runCommand(
+            context.runCommand(
                 BsonDocument(
                     "getMore" to BsonInt64(cursorId),
                     "collection" to BsonString(collection),
                     "\$db" to BsonString(database)
                 )
-            )
+        )
         return result.raw.cursorBatch("nextBatch")
     }
 
-    internal suspend fun killCursors(database: String, collection: String, cursorId: Long) {
-        runCommand(
+    internal suspend fun killCursors(
+        context: MongoOperationContext,
+        database: String,
+        collection: String,
+        cursorId: Long
+    ) {
+        context.runCommand(
             BsonDocument(
                 "killCursors" to BsonString(collection),
                 "cursors" to BsonArray(listOf(BsonInt64(cursorId))),
@@ -344,9 +411,9 @@ public class MongoClient private constructor(
         )
     }
 
-    internal suspend fun listCollectionNames(database: String): List<String> {
+    internal suspend fun listCollectionNames(context: MongoOperationContext, database: String): List<String> {
         val result =
-            runCommand(
+            context.runCommand(
                 BsonDocument(
                     "listCollections" to BsonInt32(1),
                     "nameOnly" to BsonBoolean(true),
@@ -356,7 +423,7 @@ public class MongoClient private constructor(
         val batch = result.raw.cursorBatch("firstBatch")
         val cursor =
             MongoCursor(
-                client = this,
+                context = context,
                 database = database,
                 collection = "\$cmd.listCollections",
                 initialCursorId = batch.id,
@@ -367,9 +434,13 @@ public class MongoClient private constructor(
         }
     }
 
-    internal suspend fun createCollection(database: String, collection: String): MongoCommandResult {
+    internal suspend fun createCollection(
+        context: MongoOperationContext,
+        database: String,
+        collection: String
+    ): MongoCommandResult {
         require(collection.isNotBlank()) { "MongoDB collection name cannot be blank" }
-        return runCommand(
+        return context.runCommand(
             BsonDocument(
                 "create" to BsonString(collection),
                 "\$db" to BsonString(database)
@@ -377,8 +448,12 @@ public class MongoClient private constructor(
         )
     }
 
-    internal suspend fun dropCollection(database: String, collection: String): MongoCommandResult =
-        runCommand(
+    internal suspend fun dropCollection(
+        context: MongoOperationContext,
+        database: String,
+        collection: String
+    ): MongoCommandResult =
+        context.runCommand(
             BsonDocument(
                 "drop" to BsonString(collection),
                 "\$db" to BsonString(database)
@@ -386,6 +461,7 @@ public class MongoClient private constructor(
         )
 
     internal suspend fun createIndex(
+        context: MongoOperationContext,
         database: String,
         collection: String,
         keys: BsonDocument,
@@ -402,7 +478,7 @@ public class MongoClient private constructor(
             index["unique"] = BsonBoolean(true)
         }
 
-        runCommand(
+        context.runCommand(
             BsonDocument(
                 "createIndexes" to BsonString(collection),
                 "indexes" to BsonArray(listOf(BsonDocument(index))),
@@ -412,9 +488,13 @@ public class MongoClient private constructor(
         return indexName
     }
 
-    internal suspend fun listIndexNames(database: String, collection: String): List<String> {
+    internal suspend fun listIndexNames(
+        context: MongoOperationContext,
+        database: String,
+        collection: String
+    ): List<String> {
         val result =
-            runCommand(
+            context.runCommand(
                 BsonDocument(
                     "listIndexes" to BsonString(collection),
                     "\$db" to BsonString(database)
@@ -423,7 +503,7 @@ public class MongoClient private constructor(
         val batch = result.raw.cursorBatch("firstBatch")
         val cursor =
             MongoCursor(
-                client = this,
+                context = context,
                 database = database,
                 collection = collection,
                 initialCursorId = batch.id,
@@ -434,9 +514,14 @@ public class MongoClient private constructor(
         }
     }
 
-    internal suspend fun dropIndex(database: String, collection: String, name: String): MongoCommandResult {
+    internal suspend fun dropIndex(
+        context: MongoOperationContext,
+        database: String,
+        collection: String,
+        name: String
+    ): MongoCommandResult {
         require(name.isNotBlank()) { "MongoDB index name cannot be blank" }
-        return runCommand(
+        return context.runCommand(
             BsonDocument(
                 "dropIndexes" to BsonString(collection),
                 "index" to BsonString(name),
@@ -445,9 +530,14 @@ public class MongoClient private constructor(
         )
     }
 
-    internal suspend fun findOne(database: String, collection: String, filter: BsonDocument): BsonDocument? {
+    internal suspend fun findOne(
+        context: MongoOperationContext,
+        database: String,
+        collection: String,
+        filter: BsonDocument
+    ): BsonDocument? {
         val result =
-            runCommand(
+            context.runCommand(
                 BsonDocument(
                     "find" to BsonString(collection),
                     "filter" to filter,
@@ -561,8 +651,226 @@ public class MongoClient private constructor(
     }
 }
 
+internal interface MongoOperationContext {
+    val client: MongoClient
+
+    suspend fun runCommand(command: BsonDocument): MongoCommandResult
+}
+
+private class MongoClientOperationContext(
+    override val client: MongoClient
+) : MongoOperationContext {
+    override suspend fun runCommand(command: BsonDocument): MongoCommandResult =
+        client.sendCommand(command)
+}
+
+private class MongoSessionOperationContext(
+    private val session: MongoSession
+) : MongoOperationContext {
+    override val client: MongoClient
+        get() = session.client
+
+    override suspend fun runCommand(command: BsonDocument): MongoCommandResult {
+        session.ensureOpen()
+        session.ensureNoActiveTransaction()
+        return client.sendCommand(command.withAppendedFields("lsid" to session.sessionId))
+    }
+}
+
+private class MongoTransactionOperationContext(
+    private val transaction: MongoTransaction
+) : MongoOperationContext {
+    override val client: MongoClient
+        get() = transaction.session.client
+
+    override suspend fun runCommand(command: BsonDocument): MongoCommandResult {
+        val fields = transaction.commandFieldsForOperation()
+        return client.sendCommand(command.withAppendedFields(fields))
+    }
+}
+
+public class MongoSession internal constructor(
+    internal val client: MongoClient,
+    internal val sessionId: BsonDocument
+) {
+    private val operationContext = MongoSessionOperationContext(this)
+    private var ended = false
+    private var nextTransactionNumber = 0L
+    private var activeTransaction: MongoTransaction? = null
+
+    public fun database(name: String): MongoDatabase {
+        require(name.isNotBlank()) { "MongoDB database name cannot be blank" }
+        ensureOpen()
+        ensureNoActiveTransaction()
+        return MongoDatabase(context = operationContext, name = name)
+    }
+
+    public fun startTransaction(): MongoTransaction {
+        ensureOpen()
+        check(activeTransaction == null) { "Transaction already in progress" }
+
+        val transaction = MongoTransaction(session = this, txnNumber = ++nextTransactionNumber)
+        activeTransaction = transaction
+        return transaction
+    }
+
+    public suspend fun <R> withTransaction(block: suspend MongoTransaction.() -> R): R {
+        val transaction = startTransaction()
+        val result =
+            try {
+                transaction.block()
+            } catch (throwable: Throwable) {
+                try {
+                    transaction.abort()
+                } catch (abortFailure: Throwable) {
+                    throwable.addSuppressed(abortFailure)
+                }
+                throw throwable
+            }
+
+        transaction.commit()
+        return result
+    }
+
+    public suspend fun close() {
+        if (ended) {
+            return
+        }
+
+        val transaction = activeTransaction
+        if (transaction != null) {
+            try {
+                transaction.abort()
+            } catch (_: Throwable) {
+                completeTransaction(transaction)
+            }
+        }
+
+        ended = true
+        try {
+            client.endSession(sessionId)
+        } catch (_: Throwable) {
+            // The server expires abandoned sessions on its own; close() is best-effort.
+        }
+    }
+
+    internal fun ensureOpen() {
+        check(!ended) { "MongoSession is closed" }
+    }
+
+    internal fun ensureNoActiveTransaction() {
+        check(activeTransaction == null) {
+            "MongoSession has an active transaction; use MongoTransaction.database()"
+        }
+    }
+
+    internal fun ensureActive(transaction: MongoTransaction) {
+        ensureOpen()
+        check(activeTransaction === transaction) { "MongoTransaction is no longer active" }
+    }
+
+    internal fun completeTransaction(transaction: MongoTransaction) {
+        if (activeTransaction === transaction) {
+            activeTransaction = null
+        }
+    }
+}
+
+private enum class MongoTransactionState {
+    Starting,
+    InProgress,
+    Committed,
+    Aborted
+}
+
+public class MongoTransaction internal constructor(
+    internal val session: MongoSession,
+    internal val txnNumber: Long
+) {
+    private val operationContext = MongoTransactionOperationContext(this)
+    private var state = MongoTransactionState.Starting
+
+    public fun database(name: String): MongoDatabase {
+        require(name.isNotBlank()) { "MongoDB database name cannot be blank" }
+        ensureCanRunOperation()
+        return MongoDatabase(context = operationContext, name = name)
+    }
+
+    public suspend fun commit() {
+        when (state) {
+            MongoTransactionState.Starting -> {
+                state = MongoTransactionState.Committed
+                session.completeTransaction(this)
+            }
+            MongoTransactionState.InProgress -> {
+                try {
+                    operationContext.runCommand(
+                        BsonDocument(
+                            "commitTransaction" to BsonInt32(1),
+                            "\$db" to BsonString("admin")
+                        )
+                    )
+                } finally {
+                    state = MongoTransactionState.Committed
+                    session.completeTransaction(this)
+                }
+            }
+            MongoTransactionState.Committed -> error("Cannot call commitTransaction twice")
+            MongoTransactionState.Aborted -> error("Cannot call commitTransaction after calling abortTransaction")
+        }
+    }
+
+    public suspend fun abort() {
+        when (state) {
+            MongoTransactionState.Starting -> {
+                state = MongoTransactionState.Aborted
+                session.completeTransaction(this)
+            }
+            MongoTransactionState.InProgress -> {
+                try {
+                    operationContext.runCommand(
+                        BsonDocument(
+                            "abortTransaction" to BsonInt32(1),
+                            "\$db" to BsonString("admin")
+                        )
+                    )
+                } finally {
+                    state = MongoTransactionState.Aborted
+                    session.completeTransaction(this)
+                }
+            }
+            MongoTransactionState.Committed -> error("Cannot call abortTransaction after calling commitTransaction")
+            MongoTransactionState.Aborted -> error("Cannot call abortTransaction twice")
+        }
+    }
+
+    internal fun commandFieldsForOperation(): List<Pair<String, BsonValue>> {
+        ensureCanRunOperation()
+
+        val startsTransaction = state == MongoTransactionState.Starting
+        state = MongoTransactionState.InProgress
+
+        val fields = mutableListOf<Pair<String, BsonValue>>(
+            "lsid" to session.sessionId,
+            "txnNumber" to BsonInt64(txnNumber)
+        )
+        if (startsTransaction) {
+            fields.add("startTransaction" to BsonBoolean(true))
+        }
+        fields.add("autocommit" to BsonBoolean(false))
+        return fields
+    }
+
+    private fun ensureCanRunOperation() {
+        session.ensureActive(this)
+        check(state == MongoTransactionState.Starting || state == MongoTransactionState.InProgress) {
+            "MongoTransaction is complete"
+        }
+    }
+}
+
 public class MongoCursor internal constructor(
-    private val client: MongoClient,
+    private val context: MongoOperationContext,
     private val database: String,
     private val collection: String,
     initialCursorId: Long,
@@ -587,7 +895,13 @@ public class MongoCursor internal constructor(
                 return null
             }
 
-            val nextBatch = client.getMore(database = database, collection = collection, cursorId = cursorId)
+            val nextBatch =
+                context.client.getMore(
+                    context = context,
+                    database = database,
+                    collection = collection,
+                    cursorId = cursorId
+                )
             cursorId = nextBatch.id
             batch.addAll(nextBatch.documents)
         }
@@ -612,13 +926,18 @@ public class MongoCursor internal constructor(
         cursorId = 0L
         batch.clear()
         if (id != 0L) {
-            client.killCursors(database = database, collection = collection, cursorId = id)
+            context.client.killCursors(
+                context = context,
+                database = database,
+                collection = collection,
+                cursorId = id
+            )
         }
     }
 }
 
 public class MongoDatabase internal constructor(
-    internal val client: MongoClient,
+    internal val context: MongoOperationContext,
     public val name: String
 ) {
     init {
@@ -630,10 +949,11 @@ public class MongoDatabase internal constructor(
         return MongoCollection(database = this, name = name)
     }
 
-    public suspend fun listCollectionNames(): List<String> = client.listCollectionNames(database = name)
+    public suspend fun listCollectionNames(): List<String> =
+        context.client.listCollectionNames(context = context, database = name)
 
     public suspend fun createCollection(name: String): MongoCommandResult =
-        client.createCollection(database = this.name, collection = name)
+        context.client.createCollection(context = context, database = this.name, collection = name)
 }
 
 public class MongoCollection internal constructor(
@@ -645,23 +965,46 @@ public class MongoCollection internal constructor(
     }
 
     public suspend fun insertOne(document: BsonDocument): InsertOneResult =
-        database.client.insertOne(database = database.name, collection = name, document = document)
+        database.context.client.insertOne(
+            context = database.context,
+            database = database.name,
+            collection = name,
+            document = document
+        )
 
     public suspend fun insertMany(documents: List<BsonDocument>, ordered: Boolean = true): InsertManyResult =
-        database.client.insertMany(database = database.name, collection = name, documents = documents, ordered = ordered)
+        database.context.client.insertMany(
+            context = database.context,
+            database = database.name,
+            collection = name,
+            documents = documents,
+            ordered = ordered
+        )
 
     public suspend fun deleteOne(filter: BsonDocument): DeleteResult =
-        database.client.deleteOne(database = database.name, collection = name, filter = filter)
+        database.context.client.deleteOne(
+            context = database.context,
+            database = database.name,
+            collection = name,
+            filter = filter
+        )
 
     public suspend fun deleteMany(filter: BsonDocument, ordered: Boolean = true): DeleteResult =
-        database.client.deleteMany(database = database.name, collection = name, filter = filter, ordered = ordered)
+        database.context.client.deleteMany(
+            context = database.context,
+            database = database.name,
+            collection = name,
+            filter = filter,
+            ordered = ordered
+        )
 
     public suspend fun updateOne(
         filter: BsonDocument,
         update: BsonDocument,
         upsert: Boolean = false
     ): UpdateResult =
-        database.client.updateOne(
+        database.context.client.updateOne(
+            context = database.context,
             database = database.name,
             collection = name,
             filter = filter,
@@ -674,7 +1017,8 @@ public class MongoCollection internal constructor(
         update: BsonDocument,
         upsert: Boolean = false
     ): UpdateResult =
-        database.client.updateMany(
+        database.context.client.updateMany(
+            context = database.context,
             database = database.name,
             collection = name,
             filter = filter,
@@ -687,7 +1031,8 @@ public class MongoCollection internal constructor(
         replacement: BsonDocument,
         upsert: Boolean = false
     ): UpdateResult =
-        database.client.replaceOne(
+        database.context.client.replaceOne(
+            context = database.context,
             database = database.name,
             collection = name,
             filter = filter,
@@ -696,14 +1041,20 @@ public class MongoCollection internal constructor(
         )
 
     public suspend fun findOne(filter: BsonDocument = BsonDocument()): BsonDocument? =
-        database.client.findOne(database = database.name, collection = name, filter = filter)
+        database.context.client.findOne(
+            context = database.context,
+            database = database.name,
+            collection = name,
+            filter = filter
+        )
 
     public suspend fun find(
         filter: BsonDocument = BsonDocument(),
         limit: Int = 0,
         batchSize: Int? = null
     ): MongoCursor =
-        database.client.find(
+        database.context.client.find(
+            context = database.context,
             database = database.name,
             collection = name,
             filter = filter,
@@ -712,14 +1063,15 @@ public class MongoCollection internal constructor(
         )
 
     public suspend fun drop(): MongoCommandResult =
-        database.client.dropCollection(database = database.name, collection = name)
+        database.context.client.dropCollection(context = database.context, database = database.name, collection = name)
 
     public suspend fun createIndex(
         keys: BsonDocument,
         name: String? = null,
         unique: Boolean = false
     ): String =
-        database.client.createIndex(
+        database.context.client.createIndex(
+            context = database.context,
             database = database.name,
             collection = this.name,
             keys = keys,
@@ -728,10 +1080,28 @@ public class MongoCollection internal constructor(
         )
 
     public suspend fun listIndexNames(): List<String> =
-        database.client.listIndexNames(database = database.name, collection = name)
+        database.context.client.listIndexNames(context = database.context, database = database.name, collection = name)
 
     public suspend fun dropIndex(name: String): MongoCommandResult =
-        database.client.dropIndex(database = database.name, collection = this.name, name = name)
+        database.context.client.dropIndex(
+            context = database.context,
+            database = database.name,
+            collection = this.name,
+            name = name
+        )
+}
+
+private fun BsonDocument.withAppendedFields(vararg fields: Pair<String, BsonValue>): BsonDocument =
+    withAppendedFields(fields.toList())
+
+private fun BsonDocument.withAppendedFields(fields: List<Pair<String, BsonValue>>): BsonDocument {
+    val copy = linkedMapOf<String, BsonValue>()
+    copy.putAll(values)
+    for ((name, value) in fields) {
+        check(name !in copy) { "MongoDB command already contains $name" }
+        copy[name] = value
+    }
+    return BsonDocument(copy)
 }
 
 private fun BsonDocument.toServerDescription(): MongoServerDescription =

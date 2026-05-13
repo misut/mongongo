@@ -2,6 +2,7 @@ package mongongo
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -181,6 +182,48 @@ class NativeMongoSmokeTest {
                 assertEquals(1.0, database.createCollection("native_commands").ok)
                 assertEquals(listOf("native_commands"), database.listCollectionNames())
                 assertEquals(1.0, database.collection("native_commands").drop().ok)
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
+    fun runsSessionTransactionAgainstFakeOpMsgServer() = runTest {
+        val lsid = nativeSessionId()
+
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                expectNativeStartSession(lsid)
+
+                val insert = receive()
+                assertEquals(BsonString("native_books"), insert.body["insert"])
+                assertEquals(BsonString("native_library"), insert.body["\$db"])
+                assertEquals(lsid, insert.body["lsid"])
+                assertEquals(BsonInt64(1), insert.body["txnNumber"])
+                assertEquals(BsonBoolean(true), insert.body["startTransaction"])
+                assertEquals(BsonBoolean(false), insert.body["autocommit"])
+                reply(insert, BsonDocument("ok" to BsonDouble(1.0), "n" to BsonInt32(1)))
+
+                val commit = receive()
+                assertEquals(BsonInt32(1), commit.body["commitTransaction"])
+                assertEquals(BsonString("admin"), commit.body["\$db"])
+                assertEquals(lsid, commit.body["lsid"])
+                assertEquals(BsonInt64(1), commit.body["txnNumber"])
+                assertEquals(BsonBoolean(false), commit.body["autocommit"])
+                reply(commit, BsonDocument("ok" to BsonDouble(1.0)))
+
+                expectNativeEndSessions(lsid)
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                client.withTransaction {
+                    database("native_library")
+                        .collection("native_books")
+                        .insertOne(BsonDocument("name" to BsonString("Ada")))
+                }
             } finally {
                 client.close()
             }
@@ -586,6 +629,56 @@ class NativeMongoSmokeTest {
     }
 
     @Test
+    fun commitsAndAbortsTransactionConfiguredMongoUri() = runTest {
+        val uri = environment("MONGONGO_TEST_URI") ?: return@runTest
+        val client = MongoClient.connect(uri)
+        try {
+            try {
+                val committedCollection =
+                    client
+                        .database("mongongo_native_smoke")
+                        .collection("transaction_commit_${Random.nextInt(0, Int.MAX_VALUE)}")
+                val abortedCollection =
+                    client
+                        .database("mongongo_native_smoke")
+                        .collection("transaction_abort_${Random.nextInt(0, Int.MAX_VALUE)}")
+
+                val committedId =
+                    client.withTransaction {
+                        val insertResult =
+                            database("mongongo_native_smoke")
+                                .collection(committedCollection.name)
+                                .insertOne(BsonDocument("name" to BsonString("committed")))
+                        assertIs<BsonObjectId>(insertResult.insertedId)
+                    }
+                assertEquals(BsonString("committed"), committedCollection.findOne(BsonDocument("_id" to committedId))?.get("name"))
+
+                var abortedId: BsonObjectId? = null
+                val failure =
+                    assertFailsWith<IllegalStateException> {
+                        client.withTransaction {
+                            val insertResult =
+                                database("mongongo_native_smoke")
+                                    .collection(abortedCollection.name)
+                                    .insertOne(BsonDocument("name" to BsonString("aborted")))
+                            abortedId = assertIs<BsonObjectId>(insertResult.insertedId)
+                            error("rollback")
+                        }
+                    }
+                assertEquals("rollback", failure.message)
+                assertNull(abortedCollection.findOne(BsonDocument("_id" to abortedId!!)))
+            } catch (exception: MongoCommandException) {
+                if (exception.isTransactionSupportFailure()) {
+                    return@runTest
+                }
+                throw exception
+            }
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
     fun insertsConfiguredMongoUri() = runTest {
         val uri = environment("MONGONGO_TEST_URI") ?: return@runTest
         val client = MongoClient.connect(uri)
@@ -832,3 +925,46 @@ private fun environment(name: String): String? = getenv(name)?.toKString()
 
 private fun BsonDocument.stringValue(name: String): String =
     (this[name] as? BsonString)?.value ?: error("Expected BSON string field $name")
+
+private suspend fun FakeMongoConnection.expectNativeStartSession(lsid: BsonDocument) {
+    val startSession = receive()
+    assertEquals(BsonInt32(1), startSession.body["startSession"])
+    assertEquals(BsonString("admin"), startSession.body["\$db"])
+    reply(
+        startSession,
+        BsonDocument(
+            "id" to lsid,
+            "timeoutMinutes" to BsonInt32(30),
+            "ok" to BsonDouble(1.0)
+        )
+    )
+}
+
+private suspend fun FakeMongoConnection.expectNativeEndSessions(lsid: BsonDocument) {
+    val endSessions = receive()
+    assertEquals(BsonArray(listOf(lsid)), endSessions.body["endSessions"])
+    assertEquals(BsonString("admin"), endSessions.body["\$db"])
+    reply(endSessions, BsonDocument("ok" to BsonDouble(1.0)))
+}
+
+private fun nativeSessionId(): BsonDocument =
+    BsonDocument(
+        "id" to
+            BsonBinary(
+                subtype = 4,
+                bytes = (16 until 32).map { it.toByte() }
+            )
+    )
+
+private fun MongoCommandException.isTransactionSupportFailure(): Boolean {
+    val codeName = result.getString("codeName").orEmpty()
+    val message = result.getString("errmsg").orEmpty()
+    return listOf(codeName, message).any { value ->
+        value.contains("Transaction", ignoreCase = true) &&
+            (
+                value.contains("replica", ignoreCase = true) ||
+                    value.contains("support", ignoreCase = true) ||
+                    value.contains("shard", ignoreCase = true)
+            )
+    }
+}

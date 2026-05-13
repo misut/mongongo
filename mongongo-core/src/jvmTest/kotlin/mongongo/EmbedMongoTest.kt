@@ -6,6 +6,7 @@ import kotlinx.coroutines.test.runTest
 import kotlin.random.Random
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -135,6 +136,97 @@ class EmbedMongoTest {
                     .map { it.getString("name") }
                     .toList()
             assertTrue(indexName !in names)
+        }
+    }
+
+    @Test
+    fun usesSessionForCrudWithMongongoClientAndVerifiesWithJvmDriver() = runTest {
+        val databaseName = "mongongo_test"
+        val collectionName = "session_crud_${Random.nextInt(0, Int.MAX_VALUE)}"
+        var insertedId: BsonObjectId? = null
+        val client = MongoClient.connect(shardedEmbedMongoCluster.connectionString.connectionString)
+        try {
+            client.withSession {
+                val collection = database(databaseName).collection(collectionName)
+                val insertResult = collection.insertOne(BsonDocument("name" to BsonString("session")))
+                val id = assertIs<BsonObjectId>(insertResult.insertedId)
+                insertedId = id
+
+                val found = collection.findOne(BsonDocument("_id" to id))
+                assertEquals(BsonString("session"), found?.get("name"))
+            }
+        } finally {
+            client.close()
+        }
+
+        syncClient.use { verifier ->
+            val id = insertedId ?: error("Session smoke did not insert a document")
+            val stored =
+                verifier
+                    .getDatabase(databaseName)
+                    .getCollection<Document>(collectionName)
+                    .find(Document("_id", ObjectId(id.bytes.toByteArray())))
+                    .first()
+            assertEquals("session", stored.getString("name"))
+        }
+    }
+
+    @Test
+    fun commitsAndAbortsTransactionsWithMongongoClientAndVerifiesWithJvmDriver() = runTest {
+        val databaseName = "mongongo_test"
+        val committedCollectionName = "transaction_commit_${Random.nextInt(0, Int.MAX_VALUE)}"
+        val abortedCollectionName = "transaction_abort_${Random.nextInt(0, Int.MAX_VALUE)}"
+        var committedId: BsonObjectId? = null
+        var abortedId: BsonObjectId? = null
+        val client = MongoClient.connect(shardedEmbedMongoCluster.connectionString.connectionString)
+        try {
+            try {
+                client.withTransaction {
+                    val collection = database(databaseName).collection(committedCollectionName)
+                    val insertResult = collection.insertOne(BsonDocument("name" to BsonString("committed")))
+                    val id = assertIs<BsonObjectId>(insertResult.insertedId)
+                    committedId = id
+
+                    val found = collection.findOne(BsonDocument("_id" to id))
+                    assertEquals(BsonString("committed"), found?.get("name"))
+                }
+
+                val failure =
+                    assertFailsWith<IllegalStateException> {
+                        client.withTransaction {
+                            val collection = database(databaseName).collection(abortedCollectionName)
+                            val insertResult = collection.insertOne(BsonDocument("name" to BsonString("aborted")))
+                            abortedId = assertIs<BsonObjectId>(insertResult.insertedId)
+                            error("rollback")
+                        }
+                    }
+                assertEquals("rollback", failure.message)
+            } catch (exception: MongoCommandException) {
+                if (exception.isEmbeddedTransactionSupportFailure()) {
+                    return@runTest
+                }
+                throw exception
+            }
+        } finally {
+            client.close()
+        }
+
+        syncClient.use { verifier ->
+            val committedObjectId = committedId ?: error("Transaction commit smoke did not insert a document")
+            val abortedObjectId = abortedId ?: error("Transaction abort smoke did not insert a document")
+            val database = verifier.getDatabase(databaseName)
+            val committed =
+                database
+                    .getCollection<Document>(committedCollectionName)
+                    .find(Document("_id", ObjectId(committedObjectId.bytes.toByteArray())))
+                    .first()
+            assertEquals("committed", committed.getString("name"))
+
+            val abortedCount =
+                database
+                    .getCollection<Document>(abortedCollectionName)
+                    .countDocuments(Document("_id", ObjectId(abortedObjectId.bytes.toByteArray())))
+            assertEquals(0L, abortedCount)
         }
     }
 
@@ -602,4 +694,17 @@ class EmbedMongoTest {
 
     private fun BsonDocument.stringValue(name: String): String =
         (this[name] as? BsonString)?.value ?: error("Expected BSON string field $name")
+
+    private fun MongoCommandException.isEmbeddedTransactionSupportFailure(): Boolean {
+        val codeName = result.getString("codeName").orEmpty()
+        val message = result.getString("errmsg").orEmpty()
+        return listOf(codeName, message).any { value ->
+            value.contains("Transaction", ignoreCase = true) &&
+                (
+                    value.contains("replica", ignoreCase = true) ||
+                        value.contains("support", ignoreCase = true) ||
+                        value.contains("shard", ignoreCase = true)
+                )
+        }
+    }
 }
