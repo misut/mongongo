@@ -184,6 +184,10 @@ public class BsonDocumentBuilder {
         values[name] = value
     }
 
+    public fun value(name: String, value: Any?) {
+        values[name] = value.toBsonValue()
+    }
+
     public fun double(name: String, value: Double) {
         this.value(name, BsonDouble(value))
     }
