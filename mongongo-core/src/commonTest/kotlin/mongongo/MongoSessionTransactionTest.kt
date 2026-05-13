@@ -194,6 +194,75 @@ class MongoSessionTransactionTest {
     }
 
     @Test
+    fun transactionBoundTypedCollectionPreservesContextFields() = runTest {
+        val lsid = testSessionId()
+
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                expectStartSession(lsid)
+
+                val insert = receive()
+                assertEquals(
+                    listOf("insert", "documents", "ordered", "\$db", "lsid", "txnNumber", "startTransaction", "autocommit"),
+                    insert.body.values.keys.toList()
+                )
+                assertEquals(BsonString("books"), insert.body["insert"])
+                assertEquals(BsonString("library"), insert.body["\$db"])
+                assertEquals(lsid, insert.body["lsid"])
+                assertEquals(BsonInt64(1), insert.body["txnNumber"])
+                assertEquals(BsonBoolean(true), insert.body["startTransaction"])
+                assertEquals(BsonBoolean(false), insert.body["autocommit"])
+                val document =
+                    (insert.body["documents"] as BsonArray)
+                        .values
+                        .single() as BsonDocument
+                assertEquals(BsonString("Kindred"), document["title"])
+                reply(insert, BsonDocument("ok" to BsonDouble(1.0), "n" to BsonInt32(1)))
+
+                val find = receive()
+                assertEquals(
+                    listOf("find", "filter", "limit", "singleBatch", "\$db", "lsid", "txnNumber", "autocommit"),
+                    find.body.values.keys.toList()
+                )
+                assertEquals(BsonString("books"), find.body["find"])
+                assertEquals(lsid, find.body["lsid"])
+                assertEquals(BsonInt64(1), find.body["txnNumber"])
+                assertEquals(null, find.body["startTransaction"])
+                assertEquals(BsonBoolean(false), find.body["autocommit"])
+                reply(
+                    find,
+                    BsonDocument(
+                        "cursor" to
+                            BsonDocument(
+                                "id" to BsonInt64(0),
+                                "ns" to BsonString("library.books"),
+                                "firstBatch" to BsonArray(listOf(BsonDocument("title" to BsonString("Kindred"))))
+                            ),
+                        "ok" to BsonDouble(1.0)
+                    )
+                )
+
+                expectCommit(lsid, txnNumber = 1)
+                expectEndSessions(lsid)
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                val found =
+                    client.withTransaction {
+                        val collection = database("library").collection("books", TestBookCodec)
+                        collection.insertOne(TestBook("Kindred"))
+                        collection.findOne(BsonDocument("title" to BsonString("Kindred")))
+                    }
+                assertEquals(TestBook("Kindred"), found)
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
     fun withTransactionAbortsAndRethrowsOriginalException() = runTest {
         val lsid = testSessionId()
 

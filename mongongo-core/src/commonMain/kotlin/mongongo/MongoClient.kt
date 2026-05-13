@@ -346,14 +346,15 @@ public class MongoClient private constructor(
         )
     }
 
-    internal suspend fun find(
+    internal suspend fun <T : Any> find(
         context: MongoOperationContext,
         database: String,
         collection: String,
         filter: BsonDocument,
         limit: Int,
-        batchSize: Int?
-    ): MongoCursor {
+        batchSize: Int?,
+        codec: MongoCodec<T>
+    ): MongoCursor<T> {
         require(limit >= 0) { "MongoDB find limit cannot be negative" }
         require(batchSize == null || batchSize >= 0) { "MongoDB find batchSize cannot be negative" }
 
@@ -375,7 +376,8 @@ public class MongoClient private constructor(
             database = database,
             collection = collection,
             initialCursorId = batch.id,
-            initialBatch = batch.documents
+            initialBatch = batch.documents,
+            codec = codec
         )
     }
 
@@ -427,7 +429,8 @@ public class MongoClient private constructor(
                 database = database,
                 collection = "\$cmd.listCollections",
                 initialCursorId = batch.id,
-                initialBatch = batch.documents
+                initialBatch = batch.documents,
+                codec = BsonDocumentCodec
             )
         return cursor.toList().map { document ->
             document.getString("name") ?: error("MongoDB listCollections response document did not contain string name")
@@ -507,7 +510,8 @@ public class MongoClient private constructor(
                 database = database,
                 collection = collection,
                 initialCursorId = batch.id,
-                initialBatch = batch.documents
+                initialBatch = batch.documents,
+                codec = BsonDocumentCodec
             )
         return cursor.toList().map { document ->
             document.getString("name") ?: error("MongoDB listIndexes response document did not contain string name")
@@ -869,25 +873,26 @@ public class MongoTransaction internal constructor(
     }
 }
 
-public class MongoCursor internal constructor(
+public class MongoCursor<T : Any> internal constructor(
     private val context: MongoOperationContext,
     private val database: String,
     private val collection: String,
     initialCursorId: Long,
-    initialBatch: List<BsonDocument>
+    initialBatch: List<BsonDocument>,
+    private val codec: MongoCodec<T>
 ) {
     private var cursorId = initialCursorId
     private val batch = ArrayDeque(initialBatch)
     private var closed = false
 
-    public suspend fun next(): BsonDocument? {
+    public suspend fun next(): T? {
         if (closed) {
             return null
         }
 
         while (true) {
             if (batch.isNotEmpty()) {
-                return batch.removeFirst()
+                return codec.decode(batch.removeFirst())
             }
 
             if (cursorId == 0L) {
@@ -907,8 +912,8 @@ public class MongoCursor internal constructor(
         }
     }
 
-    public suspend fun toList(): List<BsonDocument> {
-        val documents = mutableListOf<BsonDocument>()
+    public suspend fun toList(): List<T> {
+        val documents = mutableListOf<T>()
         while (true) {
             val document = next() ?: break
             documents.add(document)
@@ -944,9 +949,12 @@ public class MongoDatabase internal constructor(
         require(name.isNotBlank()) { "MongoDB database name cannot be blank" }
     }
 
-    public fun collection(name: String): MongoCollection {
+    public fun collection(name: String): BsonCollection =
+        collection(name = name, codec = BsonDocumentCodec)
+
+    public fun <T : Any> collection(name: String, codec: MongoCodec<T>): MongoCollection<T> {
         require(name.isNotBlank()) { "MongoDB collection name cannot be blank" }
-        return MongoCollection(database = this, name = name)
+        return MongoCollection(database = this, name = name, codec = codec)
     }
 
     public suspend fun listCollectionNames(): List<String> =
@@ -956,28 +964,29 @@ public class MongoDatabase internal constructor(
         context.client.createCollection(context = context, database = this.name, collection = name)
 }
 
-public class MongoCollection internal constructor(
+public class MongoCollection<T : Any> internal constructor(
     private val database: MongoDatabase,
-    public val name: String
+    public val name: String,
+    private val codec: MongoCodec<T>
 ) {
     init {
         require(name.isNotBlank()) { "MongoDB collection name cannot be blank" }
     }
 
-    public suspend fun insertOne(document: BsonDocument): InsertOneResult =
+    public suspend fun insertOne(value: T): InsertOneResult =
         database.context.client.insertOne(
             context = database.context,
             database = database.name,
             collection = name,
-            document = document
+            document = codec.encode(value)
         )
 
-    public suspend fun insertMany(documents: List<BsonDocument>, ordered: Boolean = true): InsertManyResult =
+    public suspend fun insertMany(values: List<T>, ordered: Boolean = true): InsertManyResult =
         database.context.client.insertMany(
             context = database.context,
             database = database.name,
             collection = name,
-            documents = documents,
+            documents = values.map(codec::encode),
             ordered = ordered
         )
 
@@ -1040,26 +1049,27 @@ public class MongoCollection internal constructor(
             upsert = upsert
         )
 
-    public suspend fun findOne(filter: BsonDocument = BsonDocument()): BsonDocument? =
+    public suspend fun findOne(filter: BsonDocument = BsonDocument()): T? =
         database.context.client.findOne(
             context = database.context,
             database = database.name,
             collection = name,
             filter = filter
-        )
+        )?.let(codec::decode)
 
     public suspend fun find(
         filter: BsonDocument = BsonDocument(),
         limit: Int = 0,
         batchSize: Int? = null
-    ): MongoCursor =
+    ): MongoCursor<T> =
         database.context.client.find(
             context = database.context,
             database = database.name,
             collection = name,
             filter = filter,
             limit = limit,
-            batchSize = batchSize
+            batchSize = batchSize,
+            codec = codec
         )
 
     public suspend fun drop(): MongoCommandResult =

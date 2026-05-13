@@ -9,6 +9,208 @@ import kotlin.test.assertTrue
 
 class MongoCollectionTest {
     @Test
+    fun bsonDocumentCodecEncodesAndDecodesIdentity() {
+        val document = BsonDocument("name" to BsonString("Ada"))
+
+        assertTrue(BsonDocumentCodec.encode(document) === document)
+        assertTrue(BsonDocumentCodec.decode(document) === document)
+    }
+
+    @Test
+    fun defaultCollectionReturnsBsonDocumentCollection() = runTest {
+        val found = BsonDocument("_id" to BsonString("known-id"), "name" to BsonString("Ada"))
+
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                val find = receive()
+                assertEquals(BsonString("books"), find.body["find"])
+                reply(
+                    find,
+                    BsonDocument(
+                        "cursor" to
+                            BsonDocument(
+                                "id" to BsonInt64(0),
+                                "ns" to BsonString("library.books"),
+                                "firstBatch" to BsonArray(listOf(found))
+                            ),
+                        "ok" to BsonDouble(1.0)
+                    )
+                )
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                val collection: BsonCollection = client.database("library").collection("books")
+                assertEquals(found, collection.findOne())
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
+    fun typedInsertOneEncodesValueIntoInsertCommand() = runTest {
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                val insert = receive()
+                assertEquals(listOf("insert", "documents", "ordered", "\$db"), insert.body.values.keys.toList())
+                assertEquals(BsonString("books"), insert.body["insert"])
+                assertEquals(BsonString("library"), insert.body["\$db"])
+
+                val document =
+                    insert
+                        .body["documents"]
+                        .asBson<BsonArray>()
+                        .values
+                        .single()
+                        .asBson<BsonDocument>()
+                assertTrue(document["_id"] is BsonObjectId)
+                assertEquals(BsonString("Parable of the Sower"), document["title"])
+
+                reply(insert, BsonDocument("ok" to BsonDouble(1.0), "n" to BsonInt32(1)))
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                val result =
+                    client
+                        .database("library")
+                        .collection("books", TestBookCodec)
+                        .insertOne(TestBook("Parable of the Sower"))
+                assertTrue(result.insertedId is BsonObjectId)
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
+    fun typedFindOneDecodesFirstBatchDocument() = runTest {
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                val find = receive()
+                assertEquals(BsonString("books"), find.body["find"])
+                reply(
+                    find,
+                    BsonDocument(
+                        "cursor" to
+                            BsonDocument(
+                                "id" to BsonInt64(0),
+                                "ns" to BsonString("library.books"),
+                                "firstBatch" to BsonArray(listOf(BsonDocument("title" to BsonString("Kindred"))))
+                            ),
+                        "ok" to BsonDouble(1.0)
+                    )
+                )
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                val result =
+                    client
+                        .database("library")
+                        .collection("books", TestBookCodec)
+                        .findOne()
+                assertEquals(TestBook("Kindred"), result)
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
+    fun typedFindDecodesFirstAndNextBatchDocuments() = runTest {
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                val find = receive()
+                assertEquals(BsonString("books"), find.body["find"])
+                assertEquals(BsonInt32(1), find.body["batchSize"])
+                reply(
+                    find,
+                    BsonDocument(
+                        "cursor" to
+                            BsonDocument(
+                                "id" to BsonInt64(123),
+                                "ns" to BsonString("library.books"),
+                                "firstBatch" to BsonArray(listOf(BsonDocument("title" to BsonString("Dawn"))))
+                            ),
+                        "ok" to BsonDouble(1.0)
+                    )
+                )
+
+                val getMore = receive()
+                assertEquals(BsonInt64(123), getMore.body["getMore"])
+                assertEquals(BsonString("books"), getMore.body["collection"])
+                assertEquals(BsonString("library"), getMore.body["\$db"])
+                reply(
+                    getMore,
+                    BsonDocument(
+                        "cursor" to
+                            BsonDocument(
+                                "id" to BsonInt64(0),
+                                "ns" to BsonString("library.books"),
+                                "nextBatch" to BsonArray(listOf(BsonDocument("title" to BsonString("Adulthood Rites"))))
+                            ),
+                        "ok" to BsonDouble(1.0)
+                    )
+                )
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                val result =
+                    client
+                        .database("library")
+                        .collection("books", TestBookCodec)
+                        .find(batchSize = 1)
+                        .toList()
+                assertEquals(listOf(TestBook("Dawn"), TestBook("Adulthood Rites")), result)
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
+    fun typedFindPropagatesCodecDecodeFailure() = runTest {
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                val find = receive()
+                reply(
+                    find,
+                    BsonDocument(
+                        "cursor" to
+                            BsonDocument(
+                                "id" to BsonInt64(0),
+                                "ns" to BsonString("library.books"),
+                                "firstBatch" to BsonArray(listOf(BsonDocument("title" to BsonString("Broken"))))
+                            ),
+                        "ok" to BsonDouble(1.0)
+                    )
+                )
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                val cursor =
+                    client
+                        .database("library")
+                        .collection("books", FailingTestBookCodec)
+                        .find()
+                val failure = assertFailsWith<IllegalStateException> { cursor.toList() }
+                assertEquals("decode failed", failure.message)
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
     fun listCollectionNamesSendsListCollectionsCommandAndReturnsFirstBatchNames() = runTest {
         withFakeMongoServer(
             handler = {

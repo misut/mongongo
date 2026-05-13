@@ -331,6 +331,35 @@ class EmbedMongoTest {
     }
 
     @Test
+    fun typedCollectionInsertsAndFindsAgainstEmbeddedMongo() = runTest {
+        val databaseName = "mongongo_test"
+        val collectionName = "typed_collection_${Random.nextInt(0, Int.MAX_VALUE)}"
+        val client = MongoClient.connect(shardedEmbedMongoCluster.connectionString.connectionString)
+        val insertedId =
+            try {
+                val collection = client.database(databaseName).collection(collectionName, TestBookCodec)
+                val insertResult = collection.insertOne(TestBook("The Fifth Season"))
+                val id = assertIs<BsonObjectId>(insertResult.insertedId)
+
+                val found = collection.findOne(BsonDocument("_id" to id))
+                assertEquals(TestBook("The Fifth Season"), found)
+                id
+            } finally {
+                client.close()
+            }
+
+        syncClient.use { verifier ->
+            val stored =
+                verifier
+                    .getDatabase(databaseName)
+                    .getCollection<Document>(collectionName)
+                    .find(Document("_id", ObjectId(insertedId.bytes.toByteArray())))
+                    .first()
+            assertEquals("The Fifth Season", stored.getString("title"))
+        }
+    }
+
+    @Test
     fun deletesDocumentWithMongongoClientAndVerifiesWithJvmDriver() = runTest {
         val databaseName = "mongongo_test"
         val collectionName = "delete_one_${Random.nextInt(0, Int.MAX_VALUE)}"

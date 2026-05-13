@@ -158,6 +158,39 @@ suspend fun insertAndFindMany() {
 }
 ```
 
+### typed-ready codec shell
+
+Typed serialization is not implemented yet, but you can opt into a typed
+collection by passing an explicit codec.
+
+```kotlin
+import mongongo.BsonDocument
+import mongongo.BsonString
+import mongongo.MongoClient
+import mongongo.MongoCodec
+
+data class Book(val title: String)
+
+object BookCodec : MongoCodec<Book> {
+    override fun encode(value: Book): BsonDocument =
+        BsonDocument("title" to BsonString(value.title))
+
+    override fun decode(document: BsonDocument): Book =
+        Book(document.getString("title") ?: error("Book title is missing"))
+}
+
+suspend fun insertAndFindTypedBook() {
+    val client = MongoClient.connect("mongodb://127.0.0.1:27017")
+    try {
+        val collection = client.database("mongongo_example").collection("typed_books", BookCodec)
+        collection.insertOne(Book("Dawn"))
+        check(collection.findOne()?.title == "Dawn")
+    } finally {
+        client.close()
+    }
+}
+```
+
 ### updateOne with `$set`
 
 ```kotlin
@@ -284,8 +317,9 @@ MONGONGO_AUTH_TEST_URI='mongodb://user:p%40ssword@127.0.0.1:27017/app?authSource
 
 ## Design notes
 
-- The public API works with `BsonDocument` and `BsonValue` types instead of
-  typed Kotlin serialization.
+- The default public API works with `BsonDocument` and `BsonValue` types. A
+  typed `MongoCollection<T>` shell exists for explicit `MongoCodec<T>` values,
+  but automatic kotlinx.serialization codecs are not implemented yet.
 - `commonMain` does not depend on the JVM MongoDB driver. The official JVM
   driver is used only in JVM tests for verification.
 - Commands are implemented over MongoDB OP_MSG.

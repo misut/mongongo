@@ -141,6 +141,62 @@ class NativeMongoSmokeTest {
     }
 
     @Test
+    fun typedCollectionInsertsAndFindsAgainstFakeOpMsgServer() = runTest {
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+
+                val insert = receive()
+                assertEquals(BsonString("native_books"), insert.body["insert"])
+                assertEquals(BsonString("native_library"), insert.body["\$db"])
+                val document =
+                    (insert.body["documents"] as BsonArray)
+                        .values
+                        .single() as BsonDocument
+                val generatedId = document["_id"] as BsonObjectId
+                assertEquals(BsonString("Native Typed"), document["title"])
+                reply(insert, BsonDocument("ok" to BsonDouble(1.0), "n" to BsonInt32(1)))
+
+                val find = receive()
+                assertEquals(BsonString("native_books"), find.body["find"])
+                assertEquals(BsonDocument("_id" to generatedId), find.body["filter"])
+                assertEquals(BsonString("native_library"), find.body["\$db"])
+                reply(
+                    find,
+                    BsonDocument(
+                        "cursor" to
+                            BsonDocument(
+                                "id" to BsonInt64(0),
+                                "ns" to BsonString("native_library.native_books"),
+                                "firstBatch" to
+                                    BsonArray(
+                                        listOf(
+                                            BsonDocument(
+                                                "_id" to generatedId,
+                                                "title" to BsonString("Native Typed")
+                                            )
+                                        )
+                                    )
+                            ),
+                        "ok" to BsonDouble(1.0)
+                    )
+                )
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                val collection = client.database("native_library").collection("native_books", TestBookCodec)
+                val insert = collection.insertOne(TestBook("Native Typed"))
+                val id = insert.insertedId as BsonObjectId
+                val found = collection.findOne(BsonDocument("_id" to id))
+                assertEquals(TestBook("Native Typed"), found)
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
     fun runsDatabaseCommandsAgainstFakeOpMsgServer() = runTest {
         withFakeMongoServer(
             handler = {
