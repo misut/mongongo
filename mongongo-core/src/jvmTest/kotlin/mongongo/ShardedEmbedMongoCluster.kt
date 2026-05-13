@@ -16,6 +16,8 @@ const val DEFAULT_REPLICA_SET_NAME = "fusion-main"
 const val DEFAULT_SERVICE_NAME_PREFIX = "fusion-main0"
 const val DEFAULT_SHARD_COUNT = 2
 val DEFAULT_VERSION = Version.V6_0_18
+private const val PRIMARY_WAIT_TIMEOUT_MILLIS = 30_000L
+private const val PRIMARY_WAIT_POLL_MILLIS = 250L
 
 class ShardedEmbedMongoCluster (
     replicaSetName: String = DEFAULT_REPLICA_SET_NAME,
@@ -59,10 +61,37 @@ class ShardedEmbedMongoCluster (
                     )
                 )
         }
+        waitForWritablePrimary(*serverAddresses)
     }
 
     override val connectionString: ConnectionString
         get() = ConnectionString("mongodb://${mongods.map { it.current().serverAddress }.joinToString(",")}")
+
+    private fun waitForWritablePrimary(vararg serverAddresses: ServerAddress) {
+        val deadline = System.currentTimeMillis() + PRIMARY_WAIT_TIMEOUT_MILLIS
+        var lastFailure: Throwable? = null
+
+        while (System.currentTimeMillis() < deadline) {
+            for (serverAddress in serverAddresses) {
+                try {
+                    MongoClients.create("mongodb://$serverAddress").use { client ->
+                        val hello = client.getDatabase("admin").runCommand(Document("hello", 1))
+                        if (hello.getBoolean("isWritablePrimary", false) || hello.getBoolean("ismaster", false)) {
+                            return
+                        }
+                    }
+                } catch (throwable: Throwable) {
+                    lastFailure = throwable
+                }
+            }
+
+            Thread.sleep(PRIMARY_WAIT_POLL_MILLIS)
+        }
+
+        val failure = IllegalStateException("Embedded MongoDB replica set did not elect a writable primary")
+        lastFailure?.let(failure::addSuppressed)
+        throw failure
+    }
 }
 
 private class MongodWithStorage(

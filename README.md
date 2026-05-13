@@ -323,9 +323,10 @@ MONGONGO_AUTH_TEST_URI='mongodb://user:p%40ssword@127.0.0.1:27017/app?authSource
 
 ## Design notes
 
-- The default public API works with `BsonDocument` and `BsonValue` types. A
-  typed `MongoCollection<T>` shell exists for explicit `MongoCodec<T>` values,
-  but automatic kotlinx.serialization codecs are not implemented yet.
+- The default public API works with `BsonDocument` and `BsonValue` types.
+  Typed `MongoCollection<T>` values can use either an explicit `MongoCodec<T>`
+  or the kotlinx.serialization BSON codec v0 for supported `@Serializable`
+  data classes.
 - `commonMain` does not depend on the JVM MongoDB driver. The official JVM
   driver is used only in JVM tests for verification.
 - Commands are implemented over MongoDB OP_MSG.
