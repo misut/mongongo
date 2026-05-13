@@ -1,6 +1,9 @@
 import org.jetbrains.kotlin.gradle.ExperimentalKotlinGradlePluginApi
 
-plugins { id(libs.plugins.kotlin.multiplatform.get().pluginId) }
+plugins {
+    id(libs.plugins.kotlin.multiplatform.get().pluginId)
+    id(libs.plugins.kotlin.plugin.serialization.get().pluginId)
+}
 
 kotlin {
     jvm()
@@ -17,6 +20,7 @@ kotlin {
             implementation(libs.ktor.network)
             implementation(libs.ktor.network.tls)
             implementation(libs.kotlinx.coroutines.core)
+            implementation(libs.kotlinx.serialization.core)
         }
 
         commonTest.dependencies {

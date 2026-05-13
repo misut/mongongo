@@ -5,6 +5,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.KSerializer
+import kotlinx.serialization.serializer
 
 public data class MongoCommandResult(
     val ok: Double,
@@ -956,6 +958,12 @@ public class MongoDatabase internal constructor(
         require(name.isNotBlank()) { "MongoDB collection name cannot be blank" }
         return MongoCollection(database = this, name = name, codec = codec)
     }
+
+    public fun <T : Any> collection(name: String, serializer: KSerializer<T>): MongoCollection<T> =
+        collection(name = name, codec = KotlinxBsonCodec(serializer))
+
+    public inline fun <reified T : Any> typedCollection(name: String): MongoCollection<T> =
+        collection(name = name, serializer = serializer())
 
     public suspend fun listCollectionNames(): List<String> =
         context.client.listCollectionNames(context = context, database = name)

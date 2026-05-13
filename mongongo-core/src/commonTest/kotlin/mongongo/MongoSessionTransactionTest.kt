@@ -251,7 +251,7 @@ class MongoSessionTransactionTest {
             try {
                 val found =
                     client.withTransaction {
-                        val collection = database("library").collection("books", TestBookCodec)
+                        val collection = database("library").collection("books", TestBook.serializer())
                         collection.insertOne(TestBook("Kindred"))
                         collection.findOne(BsonDocument("title" to BsonString("Kindred")))
                     }

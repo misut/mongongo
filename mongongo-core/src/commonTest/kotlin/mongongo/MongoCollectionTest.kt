@@ -77,7 +77,7 @@ class MongoCollectionTest {
                 val result =
                     client
                         .database("library")
-                        .collection("books", TestBookCodec)
+                        .typedCollection<TestBook>("books")
                         .insertOne(TestBook("Parable of the Sower"))
                 assertTrue(result.insertedId is BsonObjectId)
             } finally {
@@ -112,7 +112,7 @@ class MongoCollectionTest {
                 val result =
                     client
                         .database("library")
-                        .collection("books", TestBookCodec)
+                        .collection("books", TestBook.serializer())
                         .findOne()
                 assertEquals(TestBook("Kindred"), result)
             } finally {

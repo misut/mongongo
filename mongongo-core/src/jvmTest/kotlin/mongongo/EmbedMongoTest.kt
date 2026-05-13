@@ -337,12 +337,13 @@ class EmbedMongoTest {
         val client = MongoClient.connect(shardedEmbedMongoCluster.connectionString.connectionString)
         val insertedId =
             try {
-                val collection = client.database(databaseName).collection(collectionName, TestBookCodec)
+                val collection = client.database(databaseName).typedCollection<TestBook>(collectionName)
                 val insertResult = collection.insertOne(TestBook("The Fifth Season"))
                 val id = assertIs<BsonObjectId>(insertResult.insertedId)
 
                 val found = collection.findOne(BsonDocument("_id" to id))
                 assertEquals(TestBook("The Fifth Season"), found)
+                assertEquals(listOf(TestBook("The Fifth Season")), collection.find().toList())
                 id
             } finally {
                 client.close()

@@ -185,7 +185,7 @@ class NativeMongoSmokeTest {
         ) { uri ->
             val client = MongoClient.connect(uri)
             try {
-                val collection = client.database("native_library").collection("native_books", TestBookCodec)
+                val collection = client.database("native_library").typedCollection<TestBook>("native_books")
                 val insert = collection.insertOne(TestBook("Native Typed"))
                 val id = insert.insertedId as BsonObjectId
                 val found = collection.findOne(BsonDocument("_id" to id))
@@ -765,6 +765,24 @@ class NativeMongoSmokeTest {
             val found = collection.findOne(BsonDocument("_id" to insertedId))
             assertEquals(insertedId, found?.get("_id"))
             assertEquals(BsonString("native"), found?.get("name"))
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun typedCollectionInsertsAndFindsConfiguredMongoUri() = runTest {
+        val uri = environment("MONGONGO_TEST_URI") ?: return@runTest
+        val client = MongoClient.connect(uri)
+        try {
+            val collection =
+                client
+                    .database("mongongo_native_smoke")
+                    .typedCollection<TestBook>("typed_${Random.nextInt(0, Int.MAX_VALUE)}")
+            val insertResult = collection.insertOne(TestBook("native-typed"))
+            val insertedId = assertIs<BsonObjectId>(insertResult.insertedId)
+            val found = collection.findOne(BsonDocument("_id" to insertedId))
+            assertEquals(TestBook("native-typed"), found)
         } finally {
             client.close()
         }

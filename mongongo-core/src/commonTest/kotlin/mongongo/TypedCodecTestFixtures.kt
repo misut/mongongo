@@ -1,16 +1,18 @@
 package mongongo
 
+import kotlinx.serialization.Serializable
+
+@Serializable
 internal data class TestBook(val title: String)
 
 internal object TestBookCodec : MongoCodec<TestBook> {
+    private val codec = KotlinxBsonCodec(TestBook.serializer())
+
     override fun encode(value: TestBook): BsonDocument =
-        BsonDocument("title" to BsonString(value.title))
+        codec.encode(value)
 
     override fun decode(document: BsonDocument): TestBook =
-        TestBook(
-            title = document.getString("title")
-                ?: error("Test book document did not contain string title")
-        )
+        codec.decode(document)
 }
 
 internal object FailingTestBookCodec : MongoCodec<TestBook> {

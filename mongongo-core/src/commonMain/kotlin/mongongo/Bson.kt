@@ -4,6 +4,13 @@ import kotlin.concurrent.atomics.AtomicInt
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 import kotlin.random.Random
 import kotlin.time.Clock
+import kotlinx.serialization.KSerializer
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.descriptors.PrimitiveKind
+import kotlinx.serialization.descriptors.PrimitiveSerialDescriptor
+import kotlinx.serialization.descriptors.SerialDescriptor
+import kotlinx.serialization.encoding.Decoder
+import kotlinx.serialization.encoding.Encoder
 
 public sealed interface BsonValue
 
@@ -88,10 +95,16 @@ public data class BsonBinary(val subtype: Int, val bytes: List<Byte>) : BsonValu
     }
 }
 
+@Serializable(with = BsonObjectIdSerializer::class)
 public data class BsonObjectId(val bytes: List<Byte>) : BsonValue {
     init {
         require(bytes.size == ObjectIdByteCount) { "BSON ObjectId must contain 12 bytes" }
     }
+
+    public fun toHex(): String =
+        bytes.joinToString(separator = "") { byte ->
+            (byte.toInt() and 0xff).toString(radix = 16).padStart(length = 2, padChar = '0')
+        }
 
     public companion object {
         private const val ObjectIdByteCount = 12
@@ -106,6 +119,18 @@ public data class BsonObjectId(val bytes: List<Byte>) : BsonValue {
 
         internal fun generate(): BsonObjectId = BsonObjectIdGenerator.generate()
     }
+}
+
+public object BsonObjectIdSerializer : KSerializer<BsonObjectId> {
+    override val descriptor: SerialDescriptor =
+        PrimitiveSerialDescriptor("mongongo.BsonObjectId", PrimitiveKind.STRING)
+
+    override fun serialize(encoder: Encoder, value: BsonObjectId) {
+        encoder.encodeString(value.toHex())
+    }
+
+    override fun deserialize(decoder: Decoder): BsonObjectId =
+        BsonObjectId.fromHex(decoder.decodeString())
 }
 
 @OptIn(ExperimentalAtomicApi::class)

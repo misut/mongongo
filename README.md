@@ -27,6 +27,7 @@ Run `macosArm64Test` on a macOS Arm64 host.
 | Index helpers | `createIndex`, `listIndexNames`, `dropIndex` |
 | Sessions | explicit `startSession`, `withSession`, and session-bound databases/collections |
 | Transactions | explicit `startTransaction`, `withTransaction`, `commit`, and `abort` |
+| Typed serialization | kotlinx.serialization v0 for data classes with a small BSON mapping |
 
 Unsupported or limited in this v0 surface:
 
@@ -37,7 +38,7 @@ Unsupported or limited in this v0 surface:
 - full server session pooling
 - change streams
 - aggregation
-- typed serialization
+- typed serialization beyond the v0 mapping listed below
 - custom TLS CA files and client certificates
 - SCRAM-SHA-1
 - x509, AWS, GSSAPI, and PLAIN authentication
@@ -158,38 +159,43 @@ suspend fun insertAndFindMany() {
 }
 ```
 
-### typed-ready codec shell
+### typed serialization v0
 
-Typed serialization is not implemented yet, but you can opt into a typed
-collection by passing an explicit codec.
+`@Serializable` data classes can be used with a typed collection through
+kotlinx.serialization. The v0 mapping supports `String`, `Int`, `Long`,
+`Double`, `Boolean`, nullable values as BSON null, nested serializable objects,
+`List<T>`, and `BsonObjectId`. `@SerialName` controls the BSON field name.
 
 ```kotlin
-import mongongo.BsonDocument
-import mongongo.BsonString
+import kotlinx.serialization.SerialName
+import kotlinx.serialization.Serializable
 import mongongo.MongoClient
-import mongongo.MongoCodec
 
-data class Book(val title: String)
-
-object BookCodec : MongoCodec<Book> {
-    override fun encode(value: Book): BsonDocument =
-        BsonDocument("title" to BsonString(value.title))
-
-    override fun decode(document: BsonDocument): Book =
-        Book(document.getString("title") ?: error("Book title is missing"))
-}
+@Serializable
+data class Book(
+    @SerialName("book_title")
+    val title: String,
+    val tags: List<String> = emptyList()
+)
 
 suspend fun insertAndFindTypedBook() {
     val client = MongoClient.connect("mongodb://127.0.0.1:27017")
     try {
-        val collection = client.database("mongongo_example").collection("typed_books", BookCodec)
-        collection.insertOne(Book("Dawn"))
+        val collection = client.database("mongongo_example").typedCollection<Book>("typed_books")
+        collection.insertOne(Book(title = "Dawn", tags = listOf("sf")))
         check(collection.findOne()?.title == "Dawn")
     } finally {
         client.close()
     }
 }
 ```
+
+For an explicit serializer, use `collection("typed_books", Book.serializer())`.
+Polymorphism, maps, enums, byte arrays, dates/datetimes, and other numeric
+types are intentionally unsupported in this first mapping and fail with a
+serialization exception. Missing default-valued fields decode through the
+generated serializer defaults; unknown BSON fields such as MongoDB-generated
+`_id` are ignored when the target serializer has no matching property.
 
 ### updateOne with `$set`
 
