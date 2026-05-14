@@ -13,8 +13,17 @@ import kotlin.io.encoding.ExperimentalEncodingApi
 
 public class MongoAuthenticationException(
     message: String,
-    cause: Throwable? = null
-) : RuntimeException(message, cause)
+    cause: Throwable? = null,
+    public val result: BsonDocument? = null
+) : RuntimeException(message, cause) {
+    public val error: MongoErrorMetadata? = result?.commandErrorMetadata()
+    public val code: Int? = error?.code
+    public val codeName: String? = error?.codeName
+    public val errmsg: String? = error?.errmsg
+    public val errorLabels: Set<String> = error?.errorLabels ?: emptySet()
+
+    public fun hasErrorLabel(label: String): Boolean = label in errorLabels
+}
 
 internal fun interface MongoNonceGenerator {
     fun generateNonce(): String
@@ -105,7 +114,10 @@ private suspend fun MongoTransport.sendAuthenticationCommand(requestId: Int, bod
                 errmsg != null -> " errmsg=$errmsg"
                 else -> ""
             }
-        throw MongoAuthenticationException("MongoDB SCRAM-SHA-256 authentication command failed$summary")
+        throw MongoAuthenticationException(
+            message = "MongoDB SCRAM-SHA-256 authentication command failed$summary",
+            result = response
+        )
     }
     return response
 }

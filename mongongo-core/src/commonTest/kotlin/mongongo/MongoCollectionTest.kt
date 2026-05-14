@@ -1123,19 +1123,27 @@ class MongoCollectionTest {
                                     BsonDocument(
                                         "index" to BsonInt32(0),
                                         "code" to BsonInt32(11_000),
+                                        "codeName" to BsonString("DuplicateKey"),
                                         "errmsg" to BsonString("duplicate key")
                                     )
                                 )
-                            )
+                            ),
+                        "errorLabels" to BsonArray(listOf(BsonString("TransientTransactionError")))
                     )
                 )
             }
         ) { uri ->
             val client = MongoClient.connect(uri)
             try {
-                assertFailsWith<MongoWriteException> {
-                    client.database("library").collection("books").insertOne(BsonDocument("name" to BsonString("Ada")))
-                }
+                val failure =
+                    assertFailsWith<MongoWriteException> {
+                        client.database("library").collection("books").insertOne(BsonDocument("name" to BsonString("Ada")))
+                    }
+                assertEquals(11_000, failure.code)
+                assertEquals("DuplicateKey", failure.codeName)
+                assertEquals("duplicate key", failure.errmsg)
+                assertEquals(setOf("TransientTransactionError"), failure.errorLabels)
+                assertTrue(failure.hasErrorLabel("TransientTransactionError"))
             } finally {
                 client.close()
             }
@@ -1156,7 +1164,9 @@ class MongoCollectionTest {
                         "writeConcernError" to
                             BsonDocument(
                                 "code" to BsonInt32(64),
-                                "errmsg" to BsonString("write concern failed")
+                                "codeName" to BsonString("WriteConcernFailed"),
+                                "errmsg" to BsonString("write concern failed"),
+                                "errorLabels" to BsonArray(listOf(BsonString("UnknownTransactionCommitResult")))
                             )
                     )
                 )
@@ -1164,9 +1174,15 @@ class MongoCollectionTest {
         ) { uri ->
             val client = MongoClient.connect(uri)
             try {
-                assertFailsWith<MongoWriteException> {
-                    client.database("library").collection("books").insertOne(BsonDocument("name" to BsonString("Ada")))
-                }
+                val failure =
+                    assertFailsWith<MongoWriteException> {
+                        client.database("library").collection("books").insertOne(BsonDocument("name" to BsonString("Ada")))
+                    }
+                assertEquals(64, failure.code)
+                assertEquals("WriteConcernFailed", failure.codeName)
+                assertEquals("write concern failed", failure.errmsg)
+                assertEquals(setOf("UnknownTransactionCommitResult"), failure.errorLabels)
+                assertTrue(failure.hasErrorLabel("UnknownTransactionCommitResult"))
             } finally {
                 client.close()
             }

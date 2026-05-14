@@ -4,6 +4,7 @@ import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class MongoClientTest {
@@ -43,6 +44,42 @@ class MongoClientTest {
 
             assertFailsWith<IllegalStateException> {
                 client.ping()
+            }
+        }
+    }
+
+    @Test
+    fun commandFailureExposesServerErrorMetadata() = runTest {
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                val ping = receive()
+                reply(
+                    ping,
+                    BsonDocument(
+                        "ok" to BsonDouble(0.0),
+                        "code" to BsonInt32(91),
+                        "codeName" to BsonString("ShutdownInProgress"),
+                        "errmsg" to BsonString("node is shutting down"),
+                        "errorLabels" to BsonArray(listOf(BsonString("RetryableWriteError")))
+                    )
+                )
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                val failure =
+                    assertFailsWith<MongoCommandException> {
+                        client.ping()
+                    }
+                assertEquals(91, failure.code)
+                assertEquals("ShutdownInProgress", failure.codeName)
+                assertEquals("node is shutting down", failure.errmsg)
+                assertEquals(setOf("RetryableWriteError"), failure.errorLabels)
+                assertTrue(failure.hasErrorLabel("RetryableWriteError"))
+                assertFalse(failure.hasErrorLabel("TransientTransactionError"))
+            } finally {
+                client.close()
             }
         }
     }

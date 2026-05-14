@@ -13,6 +13,15 @@ public data class MongoCommandResult(
     val raw: BsonDocument
 )
 
+public data class MongoErrorMetadata(
+    val code: Int?,
+    val codeName: String?,
+    val errmsg: String?,
+    val errorLabels: Set<String>
+) {
+    public fun hasErrorLabel(label: String): Boolean = label in errorLabels
+}
+
 public data class InsertOneResult(
     val acknowledged: Boolean,
     val insertedId: BsonValue?,
@@ -53,11 +62,30 @@ internal data class MongoCursorBatch(
 
 public class MongoCommandException(
     public val result: BsonDocument
-) : RuntimeException("MongoDB command failed with ok=${result.okValue()}${result.commandFailureSummary()}")
+) : RuntimeException("MongoDB command failed with ok=${result.okValue()}${result.commandFailureSummary()}") {
+    public val error: MongoErrorMetadata = result.commandErrorMetadata()
+    public val code: Int? = error.code
+    public val codeName: String? = error.codeName
+    public val errmsg: String? = error.errmsg
+    public val errorLabels: Set<String> = error.errorLabels
+
+    public fun hasErrorLabel(label: String): Boolean = error.hasErrorLabel(label)
+}
 
 public class MongoWriteException(
     public val result: BsonDocument
-) : RuntimeException("MongoDB write failed${result.writeFailureSummary()}")
+) : RuntimeException("MongoDB write failed${result.writeFailureSummary()}") {
+    public val writeError: MongoErrorMetadata? = result.firstWriteErrorMetadata()
+    public val writeConcernError: MongoErrorMetadata? = result.writeConcernErrorMetadata()
+    public val error: MongoErrorMetadata = writeError ?: writeConcernError ?: result.commandErrorMetadata()
+    public val code: Int? = error.code
+    public val codeName: String? = error.codeName
+    public val errmsg: String? = error.errmsg
+    public val errorLabels: Set<String> =
+        result.errorLabels() + error.errorLabels + (writeError?.errorLabels ?: emptySet()) + (writeConcernError?.errorLabels ?: emptySet())
+
+    public fun hasErrorLabel(label: String): Boolean = label in errorLabels
+}
 
 private const val WritablePrimaryRetryAttempts = 120
 private const val WritablePrimaryRetryDelayMilliseconds = 100L
@@ -1210,6 +1238,29 @@ private fun BsonDocument.okValue(): Double =
         else -> throw IllegalStateException("MongoDB command response did not contain numeric ok")
     }
 
+internal fun BsonDocument.commandErrorMetadata(): MongoErrorMetadata =
+    MongoErrorMetadata(
+        code = intValue("code"),
+        codeName = getString("codeName"),
+        errmsg = getString("errmsg"),
+        errorLabels = errorLabels()
+    )
+
+private fun BsonDocument.firstWriteErrorMetadata(): MongoErrorMetadata? {
+    val writeErrors = getArray("writeErrors") ?: return null
+    return writeErrors.values.firstOrNull().asDocumentOrNull()?.commandErrorMetadata()
+}
+
+private fun BsonDocument.writeConcernErrorMetadata(): MongoErrorMetadata? =
+    getDocument("writeConcernError")?.commandErrorMetadata()
+
+internal fun BsonDocument.errorLabels(): Set<String> =
+    getArray("errorLabels")
+        ?.values
+        ?.mapNotNull { (it as? BsonString)?.value }
+        ?.toSet()
+        ?: emptySet()
+
 private fun BsonDocument.intValue(name: String): Int? =
     getInt32(name) ?: getInt64(name)?.toInt() ?: getDouble(name)?.toInt()
 
@@ -1217,6 +1268,8 @@ private fun BsonDocument.longValue(name: String): Long? = getNumberAsLong(name)
 
 private fun BsonDocument.documentValue(name: String): BsonDocument =
     getDocument(name) ?: error("MongoDB response field $name was not a document")
+
+private fun BsonValue?.asDocumentOrNull(): BsonDocument? = this as? BsonDocument
 
 private fun BsonDocument.arrayValue(name: String): BsonArray =
     getArray(name) ?: error("MongoDB response field $name was not an array")

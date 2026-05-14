@@ -137,17 +137,25 @@ class MongoAuthenticationTest {
                     BsonDocument(
                         "ok" to BsonDouble(0.0),
                         "code" to BsonInt32(18),
-                        "errmsg" to BsonString("Authentication failed")
+                        "codeName" to BsonString("AuthenticationFailed"),
+                        "errmsg" to BsonString("Authentication failed"),
+                        "errorLabels" to BsonArray(listOf(BsonString("HandshakeError")))
                     )
                 )
             }
         ) { baseUri ->
-            assertFailsWith<MongoAuthenticationException> {
-                MongoClient.connect(
-                    uri = authUri(baseUri),
-                    nonceGenerator = MongoNonceGenerator { "fixed-client-nonce" }
-                )
-            }
+            val failure =
+                assertFailsWith<MongoAuthenticationException> {
+                    MongoClient.connect(
+                        uri = authUri(baseUri),
+                        nonceGenerator = MongoNonceGenerator { "fixed-client-nonce" }
+                    )
+                }
+            assertEquals(18, failure.code)
+            assertEquals("AuthenticationFailed", failure.codeName)
+            assertEquals("Authentication failed", failure.errmsg)
+            assertEquals(setOf("HandshakeError"), failure.errorLabels)
+            assertTrue(failure.hasErrorLabel("HandshakeError"))
         }
     }
 
