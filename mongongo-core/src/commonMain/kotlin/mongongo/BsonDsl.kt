@@ -26,6 +26,18 @@ public fun <T : Any> update(serializer: KSerializer<T>, block: TypedBsonUpdateBu
 public inline fun <reified T : Any> typedUpdate(noinline block: TypedBsonUpdateBuilder<T>.() -> Unit): BsonDocument =
     update(serializer<T>(), block)
 
+public class BsonFieldPath internal constructor(
+    public val path: String
+) {
+    override fun toString(): String = path
+}
+
+public fun field(path: String): BsonFieldPath {
+    require(path.isNotBlank()) { "BSON field path cannot be blank" }
+    require(path.split('.').all { it.isNotBlank() }) { "BSON field path cannot contain blank segments" }
+    return BsonFieldPath(path)
+}
+
 public class BsonFilterBuilder internal constructor(
     @PublishedApi internal val fieldNames: BsonFieldNameResolver
 ) {
@@ -65,6 +77,38 @@ public class BsonFilterBuilder internal constructor(
 
     public infix fun String.nin(values: Iterable<Any?>) {
         setFieldOperator(this, "\$nin", values.toBsonArray())
+    }
+
+    public infix fun BsonFieldPath.eq(value: Any?) {
+        path eq value
+    }
+
+    public infix fun BsonFieldPath.ne(value: Any?) {
+        path ne value
+    }
+
+    public infix fun BsonFieldPath.gt(value: Any?) {
+        path gt value
+    }
+
+    public infix fun BsonFieldPath.gte(value: Any?) {
+        path gte value
+    }
+
+    public infix fun BsonFieldPath.lt(value: Any?) {
+        path lt value
+    }
+
+    public infix fun BsonFieldPath.lte(value: Any?) {
+        path lte value
+    }
+
+    public infix fun BsonFieldPath.inList(values: Iterable<Any?>) {
+        path inList values
+    }
+
+    public infix fun BsonFieldPath.nin(values: Iterable<Any?>) {
+        path nin values
     }
 
     public infix fun <T : Any, V> KProperty1<T, V>.eq(value: V) {
@@ -193,6 +237,38 @@ public class TypedBsonFilterBuilder<T : Any> internal constructor(
     public infix fun String.nin(values: Iterable<Any?>) {
         val field = this
         delegate.run { field nin values }
+    }
+
+    public infix fun BsonFieldPath.eq(value: Any?) {
+        delegate.run { path eq value }
+    }
+
+    public infix fun BsonFieldPath.ne(value: Any?) {
+        delegate.run { path ne value }
+    }
+
+    public infix fun BsonFieldPath.gt(value: Any?) {
+        delegate.run { path gt value }
+    }
+
+    public infix fun BsonFieldPath.gte(value: Any?) {
+        delegate.run { path gte value }
+    }
+
+    public infix fun BsonFieldPath.lt(value: Any?) {
+        delegate.run { path lt value }
+    }
+
+    public infix fun BsonFieldPath.lte(value: Any?) {
+        delegate.run { path lte value }
+    }
+
+    public infix fun BsonFieldPath.inList(values: Iterable<Any?>) {
+        delegate.run { path inList values }
+    }
+
+    public infix fun BsonFieldPath.nin(values: Iterable<Any?>) {
+        delegate.run { path nin values }
     }
 
     public inline infix fun <reified V> KProperty1<T, V>.eq(value: V) {
@@ -344,32 +420,64 @@ public class BsonUpdateBuilder {
         add("\$set", name, value.toBsonValue())
     }
 
+    public fun set(field: BsonFieldPath, value: Any?) {
+        set(field.path, value)
+    }
+
     public fun unset(name: String) {
         add("\$unset", name, BsonString(""))
+    }
+
+    public fun unset(field: BsonFieldPath) {
+        unset(field.path)
     }
 
     public fun inc(name: String, amount: Int) {
         add("\$inc", name, BsonInt32(amount))
     }
 
+    public fun inc(field: BsonFieldPath, amount: Int) {
+        inc(field.path, amount)
+    }
+
     public fun inc(name: String, amount: Long) {
         add("\$inc", name, BsonInt64(amount))
+    }
+
+    public fun inc(field: BsonFieldPath, amount: Long) {
+        inc(field.path, amount)
     }
 
     public fun inc(name: String, amount: Double) {
         add("\$inc", name, BsonDouble(amount))
     }
 
+    public fun inc(field: BsonFieldPath, amount: Double) {
+        inc(field.path, amount)
+    }
+
     public fun push(name: String, value: Any?) {
         add("\$push", name, value.toBsonValue())
+    }
+
+    public fun push(field: BsonFieldPath, value: Any?) {
+        push(field.path, value)
     }
 
     public fun pull(name: String, value: Any?) {
         add("\$pull", name, value.toBsonValue())
     }
 
+    public fun pull(field: BsonFieldPath, value: Any?) {
+        pull(field.path, value)
+    }
+
     public fun addToSet(name: String, value: Any?) {
         add("\$addToSet", name, value.toBsonValue())
+    }
+
+    public fun addToSet(field: BsonFieldPath, value: Any?) {
+        addToSet(field.path, value)
     }
 
     private fun add(operator: String, name: String, value: BsonValue) {
@@ -391,32 +499,64 @@ public class TypedBsonUpdateBuilder<T : Any> internal constructor(
         delegate.set(name, value)
     }
 
+    public fun set(field: BsonFieldPath, value: Any?) {
+        delegate.set(field, value)
+    }
+
     public fun unset(name: String) {
         delegate.unset(name)
+    }
+
+    public fun unset(field: BsonFieldPath) {
+        delegate.unset(field)
     }
 
     public fun inc(name: String, amount: Int) {
         delegate.inc(name, amount)
     }
 
+    public fun inc(field: BsonFieldPath, amount: Int) {
+        delegate.inc(field, amount)
+    }
+
     public fun inc(name: String, amount: Long) {
         delegate.inc(name, amount)
+    }
+
+    public fun inc(field: BsonFieldPath, amount: Long) {
+        delegate.inc(field, amount)
     }
 
     public fun inc(name: String, amount: Double) {
         delegate.inc(name, amount)
     }
 
+    public fun inc(field: BsonFieldPath, amount: Double) {
+        delegate.inc(field, amount)
+    }
+
     public fun push(name: String, value: Any?) {
         delegate.push(name, value)
+    }
+
+    public fun push(field: BsonFieldPath, value: Any?) {
+        delegate.push(field, value)
     }
 
     public fun pull(name: String, value: Any?) {
         delegate.pull(name, value)
     }
 
+    public fun pull(field: BsonFieldPath, value: Any?) {
+        delegate.pull(field, value)
+    }
+
     public fun addToSet(name: String, value: Any?) {
         delegate.addToSet(name, value)
+    }
+
+    public fun addToSet(field: BsonFieldPath, value: Any?) {
+        delegate.addToSet(field, value)
     }
 
     public inline fun <reified V> set(property: KProperty1<T, V>, value: V) {

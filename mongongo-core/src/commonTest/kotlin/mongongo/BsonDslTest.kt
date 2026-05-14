@@ -129,6 +129,45 @@ class BsonDslTest {
     }
 
     @Test
+    fun buildsExplicitFieldPathFiltersInRawAndTypedContexts() {
+        val raw =
+            filter {
+                field("metadata.edition") eq 2
+                field("metadata.rating") gte 4.0
+                field("metadata.tags") inList listOf("sf", "classic")
+            }
+
+        assertEquals(
+            BsonDocument(
+                "metadata.edition" to BsonInt32(2),
+                "metadata.rating" to BsonDocument("\$gte" to BsonDouble(4.0)),
+                "metadata.tags" to BsonDocument("\$in" to BsonArray(listOf(BsonString("sf"), BsonString("classic"))))
+            ),
+            raw
+        )
+
+        val typed =
+            typedFilter<DslMappedBook> {
+                field("metadata.edition") eq 2
+                DslMappedBook::title eq "Dune"
+            }
+
+        assertEquals(
+            BsonDocument(
+                "metadata.edition" to BsonInt32(2),
+                "book_title" to BsonString("Dune")
+            ),
+            typed
+        )
+    }
+
+    @Test
+    fun rejectsBlankExplicitFieldPaths() {
+        assertFailsWith<IllegalArgumentException> { field("") }
+        assertFailsWith<IllegalArgumentException> { field("metadata..edition") }
+    }
+
+    @Test
     fun rejectsAmbiguousSerializerFieldLookup() {
         val failure =
             assertFailsWith<IllegalArgumentException> {
@@ -203,6 +242,48 @@ class BsonDslTest {
             )
 
         assertEquals(expected, actual)
+    }
+
+    @Test
+    fun buildsExplicitFieldPathUpdatesInRawAndTypedContexts() {
+        val raw =
+            update {
+                set(field("metadata.edition"), 3)
+                unset(field("metadata.previous"))
+                inc(field("stats.reads"), 1)
+                push(field("metadata.tags"), "sf")
+                pull(field("metadata.tags"), "draft")
+                addToSet(field("metadata.authors"), "Frank Herbert")
+            }
+
+        assertEquals(
+            BsonDocument(
+                "\$set" to BsonDocument("metadata.edition" to BsonInt32(3)),
+                "\$unset" to BsonDocument("metadata.previous" to BsonString("")),
+                "\$inc" to BsonDocument("stats.reads" to BsonInt32(1)),
+                "\$push" to BsonDocument("metadata.tags" to BsonString("sf")),
+                "\$pull" to BsonDocument("metadata.tags" to BsonString("draft")),
+                "\$addToSet" to BsonDocument("metadata.authors" to BsonString("Frank Herbert"))
+            ),
+            raw
+        )
+
+        val typed =
+            typedUpdate<DslUpdateBook> {
+                set(field("metadata.edition"), 3)
+                set(DslUpdateBook::title, "Dune")
+            }
+
+        assertEquals(
+            BsonDocument(
+                "\$set" to
+                    BsonDocument(
+                        "metadata.edition" to BsonInt32(3),
+                        "book_title" to BsonString("Dune")
+                    )
+            ),
+            typed
+        )
     }
 
     @Test
