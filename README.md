@@ -357,9 +357,12 @@ MONGONGO_AUTH_TEST_URI='mongodb://user:p%40ssword@127.0.0.1:27017/app?authSource
 - The client uses one connection per `MongoClient` and serializes requests on
   that connection. It does not implement driver-grade topology monitoring or
   pooling yet.
-- `withTransaction` commits when the block completes and aborts when the block
-  throws, then rethrows the original exception. This v0 implementation does not
-  retry `TransientTransactionError` or `UnknownTransactionCommitResult` yet.
+- `withTransaction` has bounded v0 retry support: it retries the whole
+  transaction for server errors labeled `TransientTransactionError`, retries
+  `commitTransaction` for `UnknownTransactionCommitResult`, and does not retry
+  unlabeled errors. The callback may run more than once, so avoid non-idempotent
+  side effects outside MongoDB writes in the callback. Manual transaction APIs
+  remain single-attempt.
 - Sessions send `lsid` with session-bound commands. Transactions send `lsid`,
   `txnNumber`, and `autocommit: false`; the first transaction operation also
   sends `startTransaction: true`.

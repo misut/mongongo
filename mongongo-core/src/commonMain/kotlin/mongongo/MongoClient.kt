@@ -89,6 +89,10 @@ public class MongoWriteException(
 
 private const val WritablePrimaryRetryAttempts = 120
 private const val WritablePrimaryRetryDelayMilliseconds = 100L
+private const val WithTransactionMaxAttempts = 3
+private const val CommitTransactionMaxAttempts = 3
+private const val TransientTransactionErrorLabel = "TransientTransactionError"
+private const val UnknownTransactionCommitResultLabel = "UnknownTransactionCommitResult"
 
 public class MongoClient private constructor(
     public val connectionString: String,
@@ -750,21 +754,37 @@ public class MongoSession internal constructor(
     }
 
     public suspend fun <R> withTransaction(block: suspend MongoTransaction.() -> R): R {
-        val transaction = startTransaction()
-        val result =
-            try {
-                transaction.block()
-            } catch (throwable: Throwable) {
+        var lastTransientFailure: Throwable? = null
+        repeat(WithTransactionMaxAttempts) { attempt ->
+            val transaction = startTransaction()
+            val result =
                 try {
-                    transaction.abort()
-                } catch (abortFailure: Throwable) {
-                    throwable.addSuppressed(abortFailure)
+                    transaction.block()
+                } catch (throwable: Throwable) {
+                    try {
+                        transaction.abort()
+                    } catch (abortFailure: Throwable) {
+                        throwable.addSuppressed(abortFailure)
+                    }
+                    if (throwable.hasMongoErrorLabel(TransientTransactionErrorLabel) && attempt < WithTransactionMaxAttempts - 1) {
+                        lastTransientFailure = throwable
+                        return@repeat
+                    }
+                    throw throwable
+                }
+
+            try {
+                transaction.commitWithRetry()
+            } catch (throwable: Throwable) {
+                if (throwable.hasMongoErrorLabel(TransientTransactionErrorLabel) && attempt < WithTransactionMaxAttempts - 1) {
+                    lastTransientFailure = throwable
+                    return@repeat
                 }
                 throw throwable
             }
-
-        transaction.commit()
-        return result
+            return result
+        }
+        throw lastTransientFailure ?: error("MongoDB transaction retry attempts were exhausted")
     }
 
     public suspend fun close() {
@@ -839,15 +859,46 @@ public class MongoTransaction internal constructor(
             }
             MongoTransactionState.InProgress -> {
                 try {
-                    operationContext.runCommand(
-                        BsonDocument(
-                            "commitTransaction" to BsonInt32(1),
-                            "\$db" to BsonString("admin")
-                        )
-                    )
+                    runCommitCommand()
                 } finally {
                     state = MongoTransactionState.Committed
                     session.completeTransaction(this)
+                }
+            }
+            MongoTransactionState.Committed -> error("Cannot call commitTransaction twice")
+            MongoTransactionState.Aborted -> error("Cannot call commitTransaction after calling abortTransaction")
+        }
+    }
+
+    internal suspend fun commitWithRetry() {
+        when (state) {
+            MongoTransactionState.Starting -> {
+                state = MongoTransactionState.Committed
+                session.completeTransaction(this)
+            }
+            MongoTransactionState.InProgress -> {
+                try {
+                    repeat(CommitTransactionMaxAttempts) { attempt ->
+                        try {
+                            runCommitCommand()
+                            state = MongoTransactionState.Committed
+                            session.completeTransaction(this)
+                            return
+                        } catch (throwable: Throwable) {
+                            if (
+                                throwable.hasMongoErrorLabel(UnknownTransactionCommitResultLabel) &&
+                                    attempt < CommitTransactionMaxAttempts - 1
+                            ) {
+                                return@repeat
+                            }
+                            throw throwable
+                        }
+                    }
+                } finally {
+                    if (state == MongoTransactionState.InProgress) {
+                        state = MongoTransactionState.Committed
+                        session.completeTransaction(this)
+                    }
                 }
             }
             MongoTransactionState.Committed -> error("Cannot call commitTransaction twice")
@@ -894,6 +945,15 @@ public class MongoTransaction internal constructor(
         }
         fields.add("autocommit" to BsonBoolean(false))
         return fields
+    }
+
+    private suspend fun runCommitCommand() {
+        operationContext.runCommand(
+            BsonDocument(
+                "commitTransaction" to BsonInt32(1),
+                "\$db" to BsonString("admin")
+            )
+        )
     }
 
     private fun ensureCanRunOperation() {
@@ -1347,3 +1407,11 @@ private fun BsonDocument.commandFailureSummary(): String {
         else -> ""
     }
 }
+
+private fun Throwable.hasMongoErrorLabel(label: String): Boolean =
+    when (this) {
+        is MongoCommandException -> hasErrorLabel(label)
+        is MongoWriteException -> hasErrorLabel(label)
+        is MongoAuthenticationException -> hasErrorLabel(label)
+        else -> false
+    }

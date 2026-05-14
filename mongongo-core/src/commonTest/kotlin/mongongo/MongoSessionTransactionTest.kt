@@ -436,6 +436,150 @@ class MongoSessionTransactionTest {
     }
 
     @Test
+    fun withTransactionRetriesWholeTransactionForTransientTransactionError() = runTest {
+        val lsid = testSessionId()
+
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                expectStartSession(lsid)
+
+                val firstInsert = receive()
+                assertEquals(BsonBoolean(true), firstInsert.body["startTransaction"])
+                assertEquals(BsonInt64(1), firstInsert.body["txnNumber"])
+                reply(
+                    firstInsert,
+                    BsonDocument(
+                        "ok" to BsonDouble(0.0),
+                        "code" to BsonInt32(112),
+                        "errmsg" to BsonString("write conflict"),
+                        "errorLabels" to BsonArray(listOf(BsonString("TransientTransactionError")))
+                    )
+                )
+
+                expectAbort(lsid, txnNumber = 1)
+
+                val secondInsert = receive()
+                assertEquals(BsonBoolean(true), secondInsert.body["startTransaction"])
+                assertEquals(BsonInt64(2), secondInsert.body["txnNumber"])
+                reply(secondInsert, BsonDocument("ok" to BsonDouble(1.0), "n" to BsonInt32(1)))
+
+                expectCommit(lsid, txnNumber = 2)
+                expectEndSessions(lsid)
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                var attempts = 0
+                client.withTransaction {
+                    attempts += 1
+                    database("library")
+                        .collection("books")
+                        .insertOne(BsonDocument("name" to BsonString("Ada")))
+                }
+                assertEquals(2, attempts)
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
+    fun withTransactionRetriesCommitForUnknownTransactionCommitResult() = runTest {
+        val lsid = testSessionId()
+
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                expectStartSession(lsid)
+
+                val insert = receive()
+                assertEquals(BsonBoolean(true), insert.body["startTransaction"])
+                reply(insert, BsonDocument("ok" to BsonDouble(1.0), "n" to BsonInt32(1)))
+
+                val firstCommit = receive()
+                assertEquals(BsonInt32(1), firstCommit.body["commitTransaction"])
+                assertEquals(BsonInt64(1), firstCommit.body["txnNumber"])
+                reply(
+                    firstCommit,
+                    BsonDocument(
+                        "ok" to BsonDouble(0.0),
+                        "code" to BsonInt32(64),
+                        "errmsg" to BsonString("commit result unknown"),
+                        "errorLabels" to BsonArray(listOf(BsonString("UnknownTransactionCommitResult")))
+                    )
+                )
+
+                val secondCommit = receive()
+                assertEquals(BsonInt32(1), secondCommit.body["commitTransaction"])
+                assertEquals(BsonInt64(1), secondCommit.body["txnNumber"])
+                reply(secondCommit, BsonDocument("ok" to BsonDouble(1.0)))
+
+                expectEndSessions(lsid)
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                var attempts = 0
+                client.withTransaction {
+                    attempts += 1
+                    database("library")
+                        .collection("books")
+                        .insertOne(BsonDocument("name" to BsonString("Ada")))
+                }
+                assertEquals(1, attempts)
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
+    fun withTransactionDoesNotRetryNonLabeledCommandError() = runTest {
+        val lsid = testSessionId()
+
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                expectStartSession(lsid)
+
+                val insert = receive()
+                assertEquals(BsonBoolean(true), insert.body["startTransaction"])
+                reply(
+                    insert,
+                    BsonDocument(
+                        "ok" to BsonDouble(0.0),
+                        "code" to BsonInt32(13),
+                        "errmsg" to BsonString("not authorized")
+                    )
+                )
+
+                expectAbort(lsid, txnNumber = 1)
+                expectEndSessions(lsid)
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                var attempts = 0
+                val failure =
+                    assertFailsWith<MongoCommandException> {
+                        client.withTransaction {
+                            attempts += 1
+                            database("library")
+                                .collection("books")
+                                .insertOne(BsonDocument("name" to BsonString("Ada")))
+                        }
+                    }
+                assertEquals(1, attempts)
+                assertEquals(13, failure.code)
+                assertEquals(emptySet(), failure.errorLabels)
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
     fun endedSessionAndCompletedTransactionRejectOperations() = runTest {
         val lsid = testSessionId()
 
