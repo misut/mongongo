@@ -7,6 +7,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.serializer
+import kotlin.time.Clock
 
 public data class MongoCommandResult(
     val ok: Double,
@@ -60,6 +61,25 @@ internal data class MongoCursorBatch(
     val documents: List<BsonDocument>
 )
 
+internal class MongoServerSession(
+    val sessionId: BsonDocument,
+    private val timeoutMinutes: Int?
+) {
+    var dirty: Boolean = false
+    var nextTransactionNumber: Long = 0L
+    private var lastUseEpochMilliseconds: Long = Clock.System.now().toEpochMilliseconds()
+
+    fun recordUse() {
+        lastUseEpochMilliseconds = Clock.System.now().toEpochMilliseconds()
+    }
+
+    fun isExpired(): Boolean {
+        val timeout = timeoutMinutes ?: return true
+        val reusableMilliseconds = (timeout - 1).coerceAtLeast(0).toLong() * 60_000L
+        return Clock.System.now().toEpochMilliseconds() - lastUseEpochMilliseconds >= reusableMilliseconds
+    }
+}
+
 public class MongoCommandException(
     public val result: BsonDocument
 ) : RuntimeException("MongoDB command failed with ok=${result.okValue()}${result.commandFailureSummary()}") {
@@ -101,6 +121,8 @@ public class MongoClient private constructor(
     nextRequestId: Int
 ) {
     private val sendMutex = Mutex()
+    private val serverSessionPoolMutex = Mutex()
+    private val serverSessionPool = mutableListOf<MongoServerSession>()
     private val operationContext = MongoClientOperationContext(this)
     private var nextRequestId = nextRequestId
     private var closed = false
@@ -121,6 +143,31 @@ public class MongoClient private constructor(
     }
 
     public suspend fun startSession(): MongoSession {
+        val serverSession = checkoutServerSession()
+        return MongoSession(client = this, serverSession = serverSession)
+    }
+
+    private suspend fun checkoutServerSession(): MongoServerSession {
+        val expiredSessionIds = mutableListOf<BsonDocument>()
+        var reusable: MongoServerSession? = null
+
+        serverSessionPoolMutex.withLock {
+            while (serverSessionPool.isNotEmpty() && reusable == null) {
+                val serverSession = serverSessionPool.removeAt(serverSessionPool.lastIndex)
+                if (serverSession.dirty || serverSession.isExpired()) {
+                    expiredSessionIds += serverSession.sessionId
+                } else {
+                    serverSession.recordUse()
+                    reusable = serverSession
+                }
+            }
+        }
+
+        endSessionsBestEffort(expiredSessionIds)
+        return reusable ?: createServerSession()
+    }
+
+    private suspend fun createServerSession(): MongoServerSession {
         val result =
             operationContext.runCommand(
                 BsonDocument(
@@ -130,7 +177,10 @@ public class MongoClient private constructor(
             )
         val sessionId = result.raw.getDocument("id")
             ?: error("MongoDB startSession response did not contain session id")
-        return MongoSession(client = this, sessionId = sessionId)
+        return MongoServerSession(
+            sessionId = sessionId,
+            timeoutMinutes = result.raw.intValue("timeoutMinutes")
+        )
     }
 
     public suspend fun <R> withSession(block: suspend MongoSession.() -> R): R {
@@ -146,12 +196,39 @@ public class MongoClient private constructor(
         withSession { withTransaction(block) }
 
     internal suspend fun endSession(sessionId: BsonDocument) {
+        endSessions(listOf(sessionId))
+    }
+
+    private suspend fun endSessions(sessionIds: List<BsonDocument>) {
+        if (sessionIds.isEmpty()) {
+            return
+        }
         sendCommand(
             BsonDocument(
-                "endSessions" to BsonArray(listOf(sessionId)),
+                "endSessions" to BsonArray(sessionIds),
                 "\$db" to BsonString("admin")
             )
         )
+    }
+
+    private suspend fun endSessionsBestEffort(sessionIds: List<BsonDocument>) {
+        try {
+            endSessions(sessionIds)
+        } catch (_: Throwable) {
+            // Server sessions expire on the server; best-effort cleanup must not hide user work.
+        }
+    }
+
+    internal suspend fun releaseServerSession(serverSession: MongoServerSession) {
+        if (!serverSession.dirty && !serverSession.isExpired() && !closed) {
+            serverSessionPoolMutex.withLock {
+                if (!serverSession.dirty && !serverSession.isExpired() && !closed) {
+                    serverSessionPool += serverSession
+                    return
+                }
+            }
+        }
+        endSessionsBestEffort(listOf(serverSession.sessionId))
     }
 
     public suspend fun close() {
@@ -160,7 +237,49 @@ public class MongoClient private constructor(
                 return
             }
             closed = true
-            transport.close()
+            val pooledSessionIds =
+                serverSessionPoolMutex.withLock {
+                    val sessionIds = serverSessionPool.map { it.sessionId }
+                    serverSessionPool.clear()
+                    sessionIds
+                }
+
+            var failure: Throwable? = null
+            try {
+                sendEndSessionsDirectly(pooledSessionIds)
+            } catch (throwable: Throwable) {
+                failure = throwable
+            }
+            try {
+                transport.close()
+            } catch (throwable: Throwable) {
+                if (failure == null) {
+                    failure = throwable
+                } else {
+                    failure.addSuppressed(throwable)
+                }
+            }
+            if (failure != null) {
+                throw failure
+            }
+        }
+    }
+
+    private suspend fun sendEndSessionsDirectly(sessionIds: List<BsonDocument>) {
+        if (sessionIds.isEmpty()) {
+            return
+        }
+        val raw =
+            transport.send(
+                requestId = nextRequestId++,
+                body =
+                    BsonDocument(
+                        "endSessions" to BsonArray(sessionIds),
+                        "\$db" to BsonString("admin")
+                    )
+            )
+        if (raw.okValue() != 1.0) {
+            throw MongoCommandException(raw)
         }
     }
 
@@ -712,6 +831,7 @@ private class MongoSessionOperationContext(
     override suspend fun runCommand(command: BsonDocument): MongoCommandResult {
         session.ensureOpen()
         session.ensureNoActiveTransaction()
+        session.recordUse()
         return client.sendCommand(command.withAppendedFields("lsid" to session.sessionId))
     }
 }
@@ -730,11 +850,13 @@ private class MongoTransactionOperationContext(
 
 public class MongoSession internal constructor(
     internal val client: MongoClient,
-    internal val sessionId: BsonDocument
+    private val serverSession: MongoServerSession
 ) {
+    internal val sessionId: BsonDocument
+        get() = serverSession.sessionId
+
     private val operationContext = MongoSessionOperationContext(this)
     private var ended = false
-    private var nextTransactionNumber = 0L
     private var activeTransaction: MongoTransaction? = null
 
     public fun database(name: String): MongoDatabase {
@@ -748,7 +870,7 @@ public class MongoSession internal constructor(
         ensureOpen()
         check(activeTransaction == null) { "Transaction already in progress" }
 
-        val transaction = MongoTransaction(session = this, txnNumber = ++nextTransactionNumber)
+        val transaction = MongoTransaction(session = this, txnNumber = ++serverSession.nextTransactionNumber)
         activeTransaction = transaction
         return transaction
     }
@@ -797,16 +919,21 @@ public class MongoSession internal constructor(
             try {
                 transaction.abort()
             } catch (_: Throwable) {
+                serverSession.dirty = true
                 completeTransaction(transaction)
             }
         }
 
         ended = true
-        try {
-            client.endSession(sessionId)
-        } catch (_: Throwable) {
-            // The server expires abandoned sessions on its own; close() is best-effort.
-        }
+        client.releaseServerSession(serverSession)
+    }
+
+    internal fun recordUse() {
+        serverSession.recordUse()
+    }
+
+    internal fun markDirty() {
+        serverSession.dirty = true
     }
 
     internal fun ensureOpen() {
@@ -860,6 +987,9 @@ public class MongoTransaction internal constructor(
             MongoTransactionState.InProgress -> {
                 try {
                     runCommitCommand()
+                } catch (throwable: Throwable) {
+                    session.markDirty()
+                    throw throwable
                 } finally {
                     state = MongoTransactionState.Committed
                     session.completeTransaction(this)
@@ -891,6 +1021,7 @@ public class MongoTransaction internal constructor(
                             ) {
                                 return@repeat
                             }
+                            session.markDirty()
                             throw throwable
                         }
                     }
@@ -920,6 +1051,9 @@ public class MongoTransaction internal constructor(
                             "\$db" to BsonString("admin")
                         )
                     )
+                } catch (throwable: Throwable) {
+                    session.markDirty()
+                    throw throwable
                 } finally {
                     state = MongoTransactionState.Aborted
                     session.completeTransaction(this)
@@ -932,6 +1066,7 @@ public class MongoTransaction internal constructor(
 
     internal fun commandFieldsForOperation(): List<Pair<String, BsonValue>> {
         ensureCanRunOperation()
+        session.recordUse()
 
         val startsTransaction = state == MongoTransactionState.Starting
         state = MongoTransactionState.InProgress

@@ -355,8 +355,12 @@ MONGONGO_AUTH_TEST_URI='mongodb://user:p%40ssword@127.0.0.1:27017/app?authSource
   cursor is not exhausted and you stop reading early, call `close()` to send
   `killCursors`.
 - The client uses one connection per `MongoClient` and serializes requests on
-  that connection. It does not implement driver-grade topology monitoring or
-  pooling yet.
+  that connection. Connection pooling is deferred for v0.1 because the current
+  transport owns one in-flight request/response pair at a time; adding a pool
+  needs a larger checkout/checkin and authentication lifecycle.
+- Clean ended server sessions are pooled per `MongoClient`. Dirty or expired
+  sessions are ended instead of reused, and pooled sessions are ended when the
+  client closes.
 - `withTransaction` has bounded v0 retry support: it retries the whole
   transaction for server errors labeled `TransientTransactionError`, retries
   `commitTransaction` for `UnknownTransactionCommitResult`, and does not retry

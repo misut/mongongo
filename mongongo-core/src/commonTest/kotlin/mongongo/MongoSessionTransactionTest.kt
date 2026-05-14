@@ -69,6 +69,214 @@ class MongoSessionTransactionTest {
     }
 
     @Test
+    fun endedCleanSessionsAreReusedAndEndedWhenClientCloses() = runTest {
+        val lsid = testSessionId()
+
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                expectStartSession(lsid)
+
+                val firstInsert = receive()
+                assertEquals(lsid, firstInsert.body["lsid"])
+                reply(firstInsert, BsonDocument("ok" to BsonDouble(1.0), "n" to BsonInt32(1)))
+
+                val secondInsert = receive()
+                assertEquals(lsid, secondInsert.body["lsid"])
+                reply(secondInsert, BsonDocument("ok" to BsonDouble(1.0), "n" to BsonInt32(1)))
+
+                expectEndSessions(lsid)
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                val firstSession = client.startSession()
+                firstSession
+                    .database("library")
+                    .collection("books")
+                    .insertOne(BsonDocument("name" to BsonString("Ada")))
+                firstSession.close()
+
+                val secondSession = client.startSession()
+                secondSession
+                    .database("library")
+                    .collection("books")
+                    .insertOne(BsonDocument("name" to BsonString("Grace")))
+                secondSession.close()
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
+    fun reusedSessionKeepsIncreasingTransactionNumbers() = runTest {
+        val lsid = testSessionId()
+
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                expectStartSession(lsid)
+
+                val firstInsert = receive()
+                assertEquals(lsid, firstInsert.body["lsid"])
+                assertEquals(BsonInt64(1), firstInsert.body["txnNumber"])
+                assertEquals(BsonBoolean(true), firstInsert.body["startTransaction"])
+                reply(firstInsert, BsonDocument("ok" to BsonDouble(1.0), "n" to BsonInt32(1)))
+                expectCommit(lsid, txnNumber = 1)
+
+                val secondInsert = receive()
+                assertEquals(lsid, secondInsert.body["lsid"])
+                assertEquals(BsonInt64(2), secondInsert.body["txnNumber"])
+                assertEquals(BsonBoolean(true), secondInsert.body["startTransaction"])
+                reply(secondInsert, BsonDocument("ok" to BsonDouble(1.0), "n" to BsonInt32(1)))
+                expectCommit(lsid, txnNumber = 2)
+
+                expectEndSessions(lsid)
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                client.withSession {
+                    withTransaction {
+                        database("library")
+                            .collection("books")
+                            .insertOne(BsonDocument("name" to BsonString("Ada")))
+                    }
+                }
+
+                client.withSession {
+                    withTransaction {
+                        database("library")
+                            .collection("books")
+                            .insertOne(BsonDocument("name" to BsonString("Grace")))
+                    }
+                }
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
+    fun dirtySessionsAreNotReused() = runTest {
+        val dirtyLsid = testSessionId()
+        val cleanLsid =
+            BsonDocument(
+                "id" to
+                    BsonBinary(
+                        subtype = 4,
+                        bytes = (16 until 32).map { it.toByte() }
+                    )
+            )
+
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                expectStartSession(dirtyLsid)
+
+                val insert = receive()
+                assertEquals(dirtyLsid, insert.body["lsid"])
+                assertEquals(BsonBoolean(true), insert.body["startTransaction"])
+                reply(insert, BsonDocument("ok" to BsonDouble(1.0), "n" to BsonInt32(1)))
+
+                val abort = receive()
+                assertEquals(BsonInt32(1), abort.body["abortTransaction"])
+                assertEquals(dirtyLsid, abort.body["lsid"])
+                reply(
+                    abort,
+                    BsonDocument(
+                        "ok" to BsonDouble(0.0),
+                        "code" to BsonInt32(91),
+                        "errmsg" to BsonString("abort failed")
+                    )
+                )
+
+                expectEndSessions(dirtyLsid)
+                expectStartSession(cleanLsid)
+
+                val cleanInsert = receive()
+                assertEquals(cleanLsid, cleanInsert.body["lsid"])
+                reply(cleanInsert, BsonDocument("ok" to BsonDouble(1.0), "n" to BsonInt32(1)))
+
+                expectEndSessions(cleanLsid)
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                val dirtySession = client.startSession()
+                dirtySession
+                    .startTransaction()
+                    .database("library")
+                    .collection("books")
+                    .insertOne(BsonDocument("name" to BsonString("Ada")))
+                dirtySession.close()
+
+                val cleanSession = client.startSession()
+                cleanSession
+                    .database("library")
+                    .collection("books")
+                    .insertOne(BsonDocument("name" to BsonString("Grace")))
+                cleanSession.close()
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
+    fun expiredSessionsAreNotReused() = runTest {
+        val expiredLsid = testSessionId()
+        val freshLsid =
+            BsonDocument(
+                "id" to
+                    BsonBinary(
+                        subtype = 4,
+                        bytes = (32 until 48).map { it.toByte() }
+                    )
+            )
+
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                expectStartSession(expiredLsid, timeoutMinutes = 0)
+
+                val firstInsert = receive()
+                assertEquals(expiredLsid, firstInsert.body["lsid"])
+                reply(firstInsert, BsonDocument("ok" to BsonDouble(1.0), "n" to BsonInt32(1)))
+
+                expectEndSessions(expiredLsid)
+                expectStartSession(freshLsid)
+
+                val secondInsert = receive()
+                assertEquals(freshLsid, secondInsert.body["lsid"])
+                reply(secondInsert, BsonDocument("ok" to BsonDouble(1.0), "n" to BsonInt32(1)))
+
+                expectEndSessions(freshLsid)
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                val expiredSession = client.startSession()
+                expiredSession
+                    .database("library")
+                    .collection("books")
+                    .insertOne(BsonDocument("name" to BsonString("Ada")))
+                expiredSession.close()
+
+                val freshSession = client.startSession()
+                freshSession
+                    .database("library")
+                    .collection("books")
+                    .insertOne(BsonDocument("name" to BsonString("Grace")))
+                freshSession.close()
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
     fun transactionAddsFieldsToFirstAndSubsequentOperationsAndCommits() = runTest {
         val lsid = testSessionId()
 
@@ -620,7 +828,7 @@ class MongoSessionTransactionTest {
     }
 }
 
-private suspend fun FakeMongoConnection.expectStartSession(lsid: BsonDocument) {
+private suspend fun FakeMongoConnection.expectStartSession(lsid: BsonDocument, timeoutMinutes: Int = 30) {
     val startSession = receive()
     assertEquals(listOf("startSession", "\$db"), startSession.body.values.keys.toList())
     assertEquals(BsonInt32(1), startSession.body["startSession"])
@@ -629,7 +837,7 @@ private suspend fun FakeMongoConnection.expectStartSession(lsid: BsonDocument) {
         startSession,
         BsonDocument(
             "id" to lsid,
-            "timeoutMinutes" to BsonInt32(30),
+            "timeoutMinutes" to BsonInt32(timeoutMinutes),
             "ok" to BsonDouble(1.0)
         )
     )
