@@ -434,9 +434,11 @@ these before pushing a release tag:
 
 If any required secret is missing, the publish job fails before the GitHub
 Release is created. This prevents a tag workflow from silently pretending that
-Maven artifacts were published. After Gradle uploads the artifacts through the
-OSSRH Staging API compatibility endpoint, the workflow asks Central Portal to
-upload and automatically publish the `io.github.misut` deployment.
+Maven artifacts were published. The workflow drops stale OSSRH staging
+repositories before Gradle uploads the artifacts through the OSSRH Staging API
+compatibility endpoint. It then searches the staging API repositories with
+`ip=any`, uploads the resulting repository key to Central Portal, and asks
+Central Portal to automatically publish the `io.github.misut` deployment.
 
 ## Design notes
 
