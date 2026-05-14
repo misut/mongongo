@@ -112,72 +112,7 @@ Reference:
 
 All client operations are suspending. Close the client when finished.
 
-### BSON-first CRUD with DSL helpers
-
-```kotlin
-import mongongo.BsonObjectId
-import mongongo.MongoClient
-
-suspend fun insertAndFindOne() {
-    val client = MongoClient.connect("mongodb://127.0.0.1:27017")
-    try {
-        val collection = client.database("mongongo_example").collection("books")
-        val insert =
-            collection.insertOne {
-                value("title", "The Left Hand of Darkness")
-                value("year", 1969)
-                value("tags", listOf("sf", "classic"))
-            }
-        val id = insert.insertedId as BsonObjectId
-
-        val found = collection.findOne { "_id" eq id }
-        check(found?.getString("title") == "The Left Hand of Darkness")
-    } finally {
-        client.close()
-    }
-}
-```
-
-Use `filter { ... }` when a method already takes a `BsonDocument` filter, or pass
-a trailing filter block to the collection methods that provide one.
-
-```kotlin
-import mongongo.MongoClient
-import mongongo.bsonDocument
-
-suspend fun insertAndFindMany() {
-    val client = MongoClient.connect("mongodb://127.0.0.1:27017")
-    try {
-        val collection = client.database("mongongo_example").collection("books")
-        collection.insertMany(
-            listOf(
-                bsonDocument { value("title", "Parable of the Sower") },
-                bsonDocument { value("title", "A Wizard of Earthsea") }
-            )
-        )
-
-        val documents =
-            collection
-                .find(limit = 10, batchSize = 5) {
-                    "title" inList listOf("Parable of the Sower", "A Wizard of Earthsea")
-                }
-                .toList()
-        check(documents.size >= 2)
-    } finally {
-        client.close()
-    }
-}
-```
-
-The filter DSL supports equality, `ne`, `gt`, `gte`, `lt`, `lte`, `inList`,
-`nin`, `and`, `or`, and document-level `not { ... }`.
-
-### typed serialization v0
-
-`@Serializable` data classes can be used with a typed collection through
-kotlinx.serialization. The v0 mapping supports `String`, `Int`, `Long`,
-`Double`, `Boolean`, nullable values as BSON null, nested serializable objects,
-`List<T>`, and `BsonObjectId`. `@SerialName` controls the BSON field name.
+### Typed collection happy path
 
 ```kotlin
 import kotlinx.serialization.SerialName
@@ -188,95 +123,70 @@ import mongongo.MongoClient
 @Serializable
 data class Book(
     @SerialName("_id")
-    val id: BsonObjectId? = null,
+    val id: BsonObjectId,
     @SerialName("book_title")
     val title: String,
+    val author: String,
+    val revision: Int = 0,
     val status: String = "draft",
     val tags: List<String> = emptyList()
 )
 
-suspend fun insertAndFindTypedBook() {
+suspend fun typedCrud() {
     val client = MongoClient.connect("mongodb://127.0.0.1:27017")
     try {
-        val collection = client.database("mongongo_example").typedCollection<Book>("typed_books")
-        collection.insertOne(Book(title = "Dawn", tags = listOf("sf")))
-        check(collection.findOne { Book::title eq "Dawn" }?.title == "Dawn")
+        val books = client.database("mongongo_example").typedCollection<Book>("books")
+        val id = BsonObjectId.fromHex("00112233445566778899aabb")
+
+        books.insertOne(Book(id = id, title = "Dune", author = "Frank Herbert"))
+        books.insertMany(listOf(Book(BsonObjectId.fromHex("00112233445566778899aabc"), "Dawn", "Octavia Butler")))
+
+        check(books.findOne { Book::id eq id }?.title == "Dune")
+        check(books.find(limit = 10) { Book::author eq "Octavia Butler" }.toList().isNotEmpty())
+
+        books.updateOne(filter = { Book::id eq id }, update = { set(Book::title, "Dune Messiah") })
+        books.updateMany(filter = { Book::author eq "Octavia Butler" }, update = { inc(Book::revision, 1) })
+        books.replaceOne(filter = { Book::id eq id }, replacement = Book(id, "Children of Dune", "Frank Herbert"))
+        books.deleteOne { Book::id eq id }
+        books.deleteMany { Book::status eq "archived" }
     } finally {
         client.close()
     }
 }
 ```
 
-For an explicit serializer, use `collection("typed_books", Book.serializer())`.
-Polymorphism, maps, enums, byte arrays, dates/datetimes, and other numeric
-types are intentionally unsupported in this first mapping and fail with a
-serialization exception. Missing default-valued fields decode through the
-generated serializer defaults; unknown BSON fields such as MongoDB-generated
-`_id` are ignored when the target serializer has no matching property.
+For an explicit serializer, use `collection("books", Book.serializer())`.
+Typed property filters and updates resolve field names through the serializer,
+so `Book::title eq "Dune"` maps to `{ "book_title": "Dune" }` when the property
+has `@SerialName("book_title")`.
 
-Typed property filters on serialization-backed collections resolve field names
-through the collection serializer, so `Book::title eq "Dawn"` maps to
-`{ "book_title": "Dawn" }` when the property has `@SerialName("book_title")`.
-Use `typedFilter<Book> { ... }` when you need a standalone `BsonDocument` with
-the same mapping. Raw string filters such as `"title" eq "Dawn"` remain literal
-field names. Unsupported property references fail instead of falling back to a
-possibly wrong Kotlin property name.
+The filter DSL supports equality, `ne`, `gt`, `gte`, `lt`, `lte`, `inList`,
+`nin`, `and`, `or`, and document-level `not { ... }`. Use
+`typedFilter<Book> { ... }` or `typedUpdate<Book> { ... }` when you need a
+standalone `BsonDocument` with serializer-aware field names.
 
-Typed update blocks use the same field-name mapping. Use
-`typedUpdate<Book> { set(Book::title, "Dune") }`, or
-`update(Book.serializer()) { ... }`, for a
-standalone update document. A typed collection can also infer the serializer for
-trailing update blocks:
+The v0 mapping supports `String`, `Int`, `Long`, `Double`, `Boolean`, nullable
+values as BSON null, nested serializable objects, `List<T>`, and `BsonObjectId`.
+Missing default-valued fields decode through generated serializer defaults;
+missing nullable fields decode as `null`; unknown BSON fields are ignored.
+Polymorphism, maps, enums, byte arrays, dates/datetimes, and other numeric types
+are intentionally unsupported and fail with a serialization exception.
+
+### Explicit nested field paths
+
+Nested `KProperty` paths are not supported yet. Use explicit BSON field paths
+when targeting nested fields:
 
 ```kotlin
+books.findOne { field("metadata.edition") eq 2 }
 books.updateOne(
-    filter = { Book::title eq "Draft" },
-    update = { set(Book::title, "Dune") }
+    filter = { Book::id eq id },
+    update = { set(field("metadata.edition"), 3) }
 )
 ```
 
-Typed update paths currently cover top-level properties only; nested property
-paths remain a raw BSON/string-field escape hatch.
-
-### update DSL
-
-```kotlin
-import mongongo.BsonObjectId
-import mongongo.MongoClient
-import mongongo.filter
-import mongongo.update
-
-suspend fun updateOneBook() {
-    val client = MongoClient.connect("mongodb://127.0.0.1:27017")
-    try {
-        val collection = client.database("mongongo_example").collection("books")
-        val insert =
-            collection.insertOne {
-                value("title", "Draft")
-                value("status", "new")
-            }
-        val id = insert.insertedId as BsonObjectId
-
-        collection.updateOne(
-            filter { "_id" eq id },
-            update {
-                set("status", "published")
-                inc("revision", 1)
-                addToSet("tags", "released")
-            }
-        )
-
-        val found = collection.findOne { "_id" eq id }
-        check(found?.getString("status") == "published")
-    } finally {
-        client.close()
-    }
-}
-```
-
-Update DSL blocks always create operator update documents such as
-`{ "$set": ... }`. Replacement writes remain explicit through `replaceOne` and
-still reject operator documents.
+Explicit `field("a.b")` paths are literal BSON paths and work in typed and
+BSON-first filter/update DSL contexts.
 
 ### Sessions and transactions with typed collections
 
@@ -305,7 +215,7 @@ suspend fun publishInTransaction() {
             books.insertOne(TransactionBook(title = "The Dispossessed"))
             books.updateOne(
                 filter = { TransactionBook::title eq "The Dispossessed" },
-                update = { set("status", "published") }
+                update = { set(TransactionBook::status, "published") }
             )
         }
     } finally {
@@ -313,6 +223,39 @@ suspend fun publishInTransaction() {
     }
 }
 ```
+
+### BSON-first CRUD with DSL helpers
+
+The BSON-first API remains the stable escape hatch. Use it for unsupported
+serialization mappings, operators, and command shapes.
+
+```kotlin
+import mongongo.BsonObjectId
+import mongongo.MongoClient
+
+suspend fun bsonCrud() {
+    val client = MongoClient.connect("mongodb://127.0.0.1:27017")
+    try {
+        val collection = client.database("mongongo_example").collection("books")
+        val insert =
+            collection.insertOne {
+                value("title", "The Left Hand of Darkness")
+                value("year", 1969)
+                value("tags", listOf("sf", "classic"))
+            }
+        val id = insert.insertedId as BsonObjectId
+
+        collection.updateOne(filter = { "_id" eq id }, update = { set("status", "published") })
+        check(collection.findOne { "_id" eq id }?.getString("title") == "The Left Hand of Darkness")
+    } finally {
+        client.close()
+    }
+}
+```
+
+Update DSL blocks always create operator update documents such as
+`{ "$set": ... }`. Replacement writes remain explicit through `replaceOne` and
+still reject operator documents.
 
 ### Raw BSON escape hatch
 
@@ -401,8 +344,10 @@ MONGONGO_AUTH_TEST_URI='mongodb://user:p%40ssword@127.0.0.1:27017/app?authSource
   documents; raw BSON remains the escape hatch for unsupported operators.
 - Typed `MongoCollection<T>` values can use either an explicit `MongoCodec<T>` or
   the kotlinx.serialization BSON codec v0 for supported `@Serializable` data
-  classes. Typed property filters currently use Kotlin property names, not
-  serializer field-name mapping.
+  classes. Serialization-backed typed filters and updates use serializer
+  field-name mapping, including `@SerialName`.
+- Nested Kotlin property paths are not inferred. Use explicit `field("a.b")`
+  BSON paths for nested filter and update paths.
 - `commonMain` does not depend on the JVM MongoDB driver. The official JVM
   driver is used only in JVM tests for verification.
 - Commands are implemented over MongoDB OP_MSG.
