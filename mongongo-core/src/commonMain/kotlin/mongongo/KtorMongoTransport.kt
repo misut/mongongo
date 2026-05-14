@@ -40,6 +40,8 @@ internal class KtorMongoTransport private constructor(
     private val host: MongoHost,
     private val security: MongoTransportSecurity
 ) : MongoTransport {
+    private var closed = false
+
     override suspend fun send(requestId: Int, body: BsonDocument): BsonDocument {
         output.writeFully(OpMsg.encode(requestId = requestId, responseTo = 0, body = body))
         output.flush()
@@ -52,6 +54,11 @@ internal class KtorMongoTransport private constructor(
     }
 
     override fun close() {
+        if (closed) {
+            return
+        }
+        closed = true
+
         var failure: Throwable? = null
         try {
             socket.close()

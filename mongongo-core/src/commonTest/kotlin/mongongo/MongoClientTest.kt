@@ -3,6 +3,7 @@ package mongongo
 import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 class MongoClientTest {
@@ -24,6 +25,24 @@ class MongoClientTest {
                 assertEquals(1.0, client.ping().ok)
             } finally {
                 client.close()
+            }
+        }
+    }
+
+    @Test
+    fun closeIsIdempotentAndRejectsLaterOperations() = runTest {
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+
+            client.close()
+            client.close()
+
+            assertFailsWith<IllegalStateException> {
+                client.ping()
             }
         }
     }

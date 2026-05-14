@@ -969,6 +969,54 @@ class MongoCollectionTest {
     }
 
     @Test
+    fun findToListKillsOpenCursorWhenDecodeFails() = runTest {
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                val find = receive()
+                reply(
+                    find,
+                    BsonDocument(
+                        "cursor" to
+                            BsonDocument(
+                                "id" to BsonInt64(789),
+                                "ns" to BsonString("library.books"),
+                                "firstBatch" to BsonArray(listOf(BsonDocument("name" to BsonString("Ada"))))
+                            ),
+                        "ok" to BsonDouble(1.0)
+                    )
+                )
+
+                val killCursors = receive()
+                assertEquals(BsonString("books"), killCursors.body["killCursors"])
+                assertEquals(BsonArray(listOf(BsonInt64(789))), killCursors.body["cursors"])
+                reply(
+                    killCursors,
+                    BsonDocument(
+                        "cursorsKilled" to BsonArray(listOf(BsonInt64(789))),
+                        "cursorsNotFound" to BsonArray(emptyList()),
+                        "cursorsAlive" to BsonArray(emptyList()),
+                        "cursorsUnknown" to BsonArray(emptyList()),
+                        "ok" to BsonDouble(1.0)
+                    )
+                )
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                val cursor = client.database("library").collection("books", FailingDecodeCodec).find()
+                val failure =
+                    assertFailsWith<IllegalStateException> {
+                        cursor.toList()
+                    }
+                assertEquals("decode failed", failure.message)
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
     fun findFailsOnCommandFailure() = runTest {
         withFakeMongoServer(
             handler = {
@@ -2514,3 +2562,10 @@ class MongoCollectionTest {
 
 private inline fun <reified T : BsonValue> BsonValue?.asBson(): T =
     this as? T ?: error("Unexpected BSON value $this")
+
+private object FailingDecodeCodec : MongoCodec<BsonDocument> {
+    override fun encode(value: BsonDocument): BsonDocument = value
+
+    override fun decode(document: BsonDocument): BsonDocument =
+        error("decode failed")
+}

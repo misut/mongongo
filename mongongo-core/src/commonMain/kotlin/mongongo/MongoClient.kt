@@ -123,18 +123,19 @@ public class MongoClient private constructor(
     }
 
     public suspend fun close() {
-        if (closed) {
-            return
+        sendMutex.withLock {
+            if (closed) {
+                return
+            }
+            closed = true
+            transport.close()
         }
-        closed = true
-        transport.close()
     }
 
     internal suspend fun sendCommand(command: BsonDocument): MongoCommandResult {
-        check(!closed) { "MongoClient is closed" }
-
         val raw =
             sendMutex.withLock {
+                check(!closed) { "MongoClient is closed" }
                 transport.send(requestId = nextRequestId++, body = command)
             }
         val ok = raw.okValue()
@@ -916,9 +917,18 @@ public class MongoCursor<T : Any> internal constructor(
 
     public suspend fun toList(): List<T> {
         val documents = mutableListOf<T>()
-        while (true) {
-            val document = next() ?: break
-            documents.add(document)
+        try {
+            while (true) {
+                val document = next() ?: break
+                documents.add(document)
+            }
+        } catch (throwable: Throwable) {
+            try {
+                close()
+            } catch (closeFailure: Throwable) {
+                throwable.addSuppressed(closeFailure)
+            }
+            throw throwable
         }
         return documents
     }
