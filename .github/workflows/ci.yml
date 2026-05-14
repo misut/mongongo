@@ -63,3 +63,6 @@ jobs:
 
       - name: Run macOS Arm64 tests
         run: ./gradlew :mongongo-core:macosArm64Test
+
+      - name: Validate local Maven publishing
+        run: ./gradlew :mongongo-core:publishToMavenLocal
