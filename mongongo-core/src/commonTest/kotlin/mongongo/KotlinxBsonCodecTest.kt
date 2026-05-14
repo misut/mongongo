@@ -40,6 +40,11 @@ private data class CodecNestedBook(
 )
 
 @Serializable
+private data class CodecNestedAuthorListBook(
+    val authors: List<CodecAuthor>
+)
+
+@Serializable
 private data class CodecIdentifiedBook(
     @SerialName("_id")
     val id: BsonObjectId
@@ -52,8 +57,40 @@ private data class CodecDefaultedBook(
 )
 
 @Serializable
+private data class CodecMissingNullableBook(
+    val title: String,
+    val subtitle: String?
+)
+
+@Serializable
+private data class CodecRequiredBook(
+    val title: String,
+    val pages: Int
+)
+
+@Serializable
 private data class CodecUnsupportedBook(
     val metadata: Map<String, String>
+)
+
+@Serializable
+private enum class CodecGenre {
+    SF
+}
+
+@Serializable
+private data class CodecEnumBook(
+    val genre: CodecGenre
+)
+
+@Serializable
+private data class CodecByteArrayBook(
+    val payload: ByteArray
+)
+
+@Serializable
+private data class CodecDateReadBook(
+    val publishedAt: String
 )
 
 class KotlinxBsonCodecTest {
@@ -105,6 +142,33 @@ class KotlinxBsonCodecTest {
     }
 
     @Test
+    fun encodesAndDecodesListOfNestedObjects() {
+        val codec = KotlinxBsonCodec(CodecNestedAuthorListBook.serializer())
+        val document =
+            codec.encode(
+                CodecNestedAuthorListBook(
+                    authors = listOf(CodecAuthor("Octavia Butler"), CodecAuthor("Ursula Le Guin"))
+                )
+            )
+
+        assertEquals(
+            BsonArray(
+                listOf(
+                    BsonDocument("name" to BsonString("Octavia Butler")),
+                    BsonDocument("name" to BsonString("Ursula Le Guin"))
+                )
+            ),
+            document["authors"]
+        )
+        assertEquals(
+            CodecNestedAuthorListBook(
+                authors = listOf(CodecAuthor("Octavia Butler"), CodecAuthor("Ursula Le Guin"))
+            ),
+            codec.decode(document)
+        )
+    }
+
+    @Test
     fun encodesAndDecodesBsonObjectIdProperty() {
         val codec = KotlinxBsonCodec(CodecIdentifiedBook.serializer())
         val id = BsonObjectId.fromHex("00112233445566778899aabb")
@@ -127,7 +191,28 @@ class KotlinxBsonCodecTest {
     }
 
     @Test
-    fun unsupportedTypeFailsWithClearException() {
+    fun missingNullableFieldDecodesAsNull() {
+        val codec = KotlinxBsonCodec(CodecMissingNullableBook.serializer())
+
+        assertEquals(
+            CodecMissingNullableBook(title = "Dawn", subtitle = null),
+            codec.decode(BsonDocument("title" to BsonString("Dawn")))
+        )
+    }
+
+    @Test
+    fun missingRequiredNonNullFieldFailsClearly() {
+        val codec = KotlinxBsonCodec(CodecRequiredBook.serializer())
+        val failure =
+            assertFailsWith<SerializationException> {
+                codec.decode(BsonDocument("title" to BsonString("Dawn")))
+            }
+
+        assertTrue(failure.message.orEmpty().contains("pages"))
+    }
+
+    @Test
+    fun unsupportedMapFailsWithClearException() {
         val codec = KotlinxBsonCodec(CodecUnsupportedBook.serializer())
         val failure =
             assertFailsWith<SerializationException> {
@@ -136,5 +221,40 @@ class KotlinxBsonCodecTest {
 
         assertTrue(failure.message.orEmpty().contains("Map"))
         assertTrue(failure.message.orEmpty().contains("kotlinx BSON codec v0"))
+    }
+
+    @Test
+    fun unsupportedEnumFailsWithClearException() {
+        val codec = KotlinxBsonCodec(CodecEnumBook.serializer())
+        val failure =
+            assertFailsWith<SerializationException> {
+                codec.encode(CodecEnumBook(CodecGenre.SF))
+            }
+
+        assertTrue(failure.message.orEmpty().contains("enum"))
+        assertTrue(failure.message.orEmpty().contains("kotlinx BSON codec v0"))
+    }
+
+    @Test
+    fun unsupportedByteArrayFailsWithClearException() {
+        val codec = KotlinxBsonCodec(CodecByteArrayBook.serializer())
+        val failure =
+            assertFailsWith<SerializationException> {
+                codec.encode(CodecByteArrayBook(byteArrayOf(1, 2, 3)))
+            }
+
+        assertTrue(failure.message.orEmpty().contains("Byte"))
+        assertTrue(failure.message.orEmpty().contains("kotlinx BSON codec v0"))
+    }
+
+    @Test
+    fun unsupportedDateTimeBsonValueFailsWithClearException() {
+        val codec = KotlinxBsonCodec(CodecDateReadBook.serializer())
+        val failure =
+            assertFailsWith<SerializationException> {
+                codec.decode(BsonDocument("publishedAt" to BsonDateTime(1_700_000_000_000)))
+            }
+
+        assertTrue(failure.message.orEmpty().contains("BSON datetime"))
     }
 }

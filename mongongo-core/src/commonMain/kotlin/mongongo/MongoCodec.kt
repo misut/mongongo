@@ -257,7 +257,9 @@ private class BsonDocumentDecoder(
     private val document: BsonDocument
 ) : BsonValueDecoder(document) {
     private val fieldNames = document.values.keys.toList()
+    private val seenIndices = mutableSetOf<Int>()
     private var fieldCursor = 0
+    private var missingNullableCursor = 0
     private var currentFieldValue: BsonValue = BsonNull
 
     override fun currentValue(): BsonValue = currentFieldValue
@@ -269,8 +271,20 @@ private class BsonDocumentDecoder(
             if (index == CompositeDecoder.UNKNOWN_NAME) {
                 continue
             }
+            seenIndices.add(index)
             currentFieldValue = document.values.getValue(fieldName)
             return index
+        }
+
+        while (missingNullableCursor < descriptor.elementsCount) {
+            val index = missingNullableCursor++
+            if (index in seenIndices || descriptor.isElementOptional(index)) {
+                continue
+            }
+            if (descriptor.getElementDescriptor(index).isNullable) {
+                currentFieldValue = BsonNull
+                return index
+            }
         }
         return CompositeDecoder.DECODE_DONE
     }
