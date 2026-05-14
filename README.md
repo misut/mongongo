@@ -28,11 +28,13 @@ Run `macosArm64Test` on a macOS Arm64 host.
 | Index helpers | `createIndex`, `listIndexNames`, `dropIndex` |
 | Sessions | explicit `startSession`, `withSession`, and session-bound databases/collections |
 | Transactions | explicit `startTransaction`, `withTransaction`, `commit`, and `abort` |
+| Error metadata | command error `code`, `codeName`, `errmsg`, and `errorLabels` |
 | Typed serialization | kotlinx.serialization v0 for data classes with a small BSON mapping |
 | BSON DSLs | filter, update, and document builder helpers for common CRUD calls |
 
 Unsupported or limited in this v0 surface:
 
+- published Maven coordinates
 - connection pooling
 - retryable writes
 - causal consistency `operationTime` / `$clusterTime` tracking
@@ -59,6 +61,10 @@ or worktree before retrying:
 ```sh
 mise trust .
 ```
+
+No Maven artifact is published yet. See
+[`docs/release-notes/v0.1.md`](docs/release-notes/v0.1.md) for the current
+release-candidate packaging checklist.
 
 ## Connection strings
 
@@ -308,11 +314,41 @@ suspend fun createListAndDropIndex() {
 }
 ```
 
+### MongoDB errors and labels
+
+Command errors expose MongoDB metadata through `MongoCommandException`.
+Write-command failures use `MongoWriteException`, authentication failures use
+`MongoAuthenticationException`, and both preserve the command metadata when the
+server provided it.
+
+```kotlin
+try {
+    client.database("mongongo_example").collection("books").insertOne {
+        value("_id", "known-id")
+        value("title", "Duplicate")
+    }
+} catch (exception: MongoCommandException) {
+    val code = exception.code
+    val codeName = exception.codeName
+    val message = exception.errmsg
+
+    if (exception.hasErrorLabel("TransientTransactionError")) {
+        // The built-in withTransaction helper handles this label with bounded retries.
+    }
+}
+```
+
+Error labels are exposed for transaction retry decisions. The v0
+`withTransaction` helper uses only MongoDB server-provided labels and a small
+fixed retry bound; manual transaction APIs remain single-attempt.
+
 ## Smoke tests
 
 The normal verification suite uses fake OP_MSG servers and embedded JVM MongoDB
 where possible. Native smoke tests against a real MongoDB deployment are
 environment-gated and skip when the relevant URI is unset.
+The smoke harness does not require Docker and does not create external
+deployments; provide URIs for deployments you manage.
 
 Plain local MongoDB smoke:
 
