@@ -222,6 +222,22 @@ the same mapping. Raw string filters such as `"title" eq "Dawn"` remain literal
 field names. Unsupported property references fail instead of falling back to a
 possibly wrong Kotlin property name.
 
+Typed update blocks use the same field-name mapping. Use
+`typedUpdate<Book> { set(Book::title, "Dune") }`, or
+`update(Book.serializer()) { ... }`, for a
+standalone update document. A typed collection can also infer the serializer for
+trailing update blocks:
+
+```kotlin
+books.updateOne(
+    filter = { Book::title eq "Draft" },
+    update = { set(Book::title, "Dune") }
+)
+```
+
+Typed update paths currently cover top-level properties only; nested property
+paths remain a raw BSON/string-field escape hatch.
+
 ### update DSL
 
 ```kotlin

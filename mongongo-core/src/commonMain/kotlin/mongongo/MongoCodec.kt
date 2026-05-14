@@ -50,7 +50,8 @@ public typealias BsonCursor = MongoCursor<BsonDocument>
 
 private const val BsonObjectIdSerialName = "mongongo.BsonObjectId"
 
-private fun <T> encodeToBsonValue(serializer: SerializationStrategy<T>, value: T): BsonValue {
+@PublishedApi
+internal fun <T> encodeToBsonValue(serializer: SerializationStrategy<T>, value: T): BsonValue {
     var encoded: BsonValue? = null
     BsonValueEncoder { bsonValue ->
         check(encoded == null) { "Serializer for ${serializer.descriptor.serialName} encoded multiple BSON values" }

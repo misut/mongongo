@@ -9,8 +9,20 @@ import kotlin.test.assertTrue
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.toKString
 import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.SerialName
+import kotlinx.serialization.Serializable
 import kotlin.random.Random
 import platform.posix.getenv
+
+@Serializable
+private data class NativeSerialNamedBook(
+    @SerialName("_id")
+    val id: BsonObjectId,
+    @SerialName("book_title")
+    val title: String,
+    @SerialName("published_year")
+    val year: Int = 0
+)
 
 class NativeMongoSmokeTest {
     @Test
@@ -513,6 +525,51 @@ class NativeMongoSmokeTest {
                         .collection("native_books")
                         .updateOne(filter = filter, update = update)
                 assertEquals(1L, result.matchedCount)
+                assertEquals(1L, result.modifiedCount)
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
+    fun typedUpdatesAgainstFakeOpMsgServerUseSerializedFieldNames() = runTest {
+        val id = BsonObjectId.fromHex("000000000000000000000002")
+
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                val updateCommand = receive()
+                assertEquals(BsonString("native_books"), updateCommand.body["update"])
+                assertEquals(BsonString("native_library"), updateCommand.body["\$db"])
+                val updates = updateCommand.body["updates"] as BsonArray
+                val statement = updates.values.single() as BsonDocument
+                assertEquals(BsonDocument("_id" to id), statement["q"])
+                assertEquals(
+                    BsonDocument("\$set" to BsonDocument("book_title" to BsonString("Dune"))),
+                    statement["u"]
+                )
+                assertEquals(BsonBoolean(false), statement["multi"])
+                reply(
+                    updateCommand,
+                    BsonDocument(
+                        "ok" to BsonDouble(1.0),
+                        "n" to BsonInt32(1),
+                        "nModified" to BsonInt32(1)
+                    )
+                )
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                val result =
+                    client
+                        .database("native_library")
+                        .typedCollection<NativeSerialNamedBook>("native_books")
+                        .updateOne(
+                            filter = { NativeSerialNamedBook::id eq id },
+                            update = { set(NativeSerialNamedBook::title, "Dune") }
+                        )
                 assertEquals(1L, result.modifiedCount)
             } finally {
                 client.close()

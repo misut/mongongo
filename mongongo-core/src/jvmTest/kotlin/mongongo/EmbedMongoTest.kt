@@ -3,6 +3,8 @@ package mongongo
 import com.mongodb.ConnectionString
 import com.mongodb.kotlin.client.MongoClient as JvmMongoClient
 import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.SerialName
+import kotlinx.serialization.Serializable
 import kotlin.random.Random
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -12,6 +14,15 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import org.bson.Document
 import org.bson.types.ObjectId
+
+@Serializable
+private data class EmbeddedTypedBook(
+    @SerialName("book_title")
+    val title: String,
+    val status: String = "draft",
+    @SerialName("tag_list")
+    val tags: List<String> = emptyList()
+)
 
 class EmbedMongoTest {
     private val shardedEmbedMongoCluster = ShardedEmbedMongoCluster()
@@ -463,6 +474,45 @@ class EmbedMongoTest {
                     .first()
             assertEquals("Ada", stored.getString("name"))
             assertEquals("writer", stored.getString("role"))
+        }
+    }
+
+    @Test
+    fun updatesTypedDocumentWithTypedUpdateDslAndFindsDecodedResult() = runTest {
+        val databaseName = "mongongo_test"
+        val collectionName = "typed_update_one_${Random.nextInt(0, Int.MAX_VALUE)}"
+        val client = MongoClient.connect(shardedEmbedMongoCluster.connectionString.connectionString)
+        try {
+            val collection = client.database(databaseName).typedCollection<EmbeddedTypedBook>(collectionName)
+            collection.insertOne(EmbeddedTypedBook(title = "Draft", status = "new"))
+
+            val updateResult =
+                collection.updateOne(
+                    filter = { EmbeddedTypedBook::title eq "Draft" },
+                    update = {
+                        set(EmbeddedTypedBook::title, "Dune")
+                        addToSet(EmbeddedTypedBook::tags, "sf")
+                    }
+                )
+            assertEquals(1L, updateResult.matchedCount)
+            assertEquals(1L, updateResult.modifiedCount)
+
+            val found = collection.findOne { EmbeddedTypedBook::title eq "Dune" }
+            assertEquals(EmbeddedTypedBook(title = "Dune", status = "new", tags = listOf("sf")), found)
+        } finally {
+            client.close()
+        }
+
+        syncClient.use { verifier ->
+            val stored =
+                verifier
+                    .getDatabase(databaseName)
+                    .getCollection<Document>(collectionName)
+                    .find(Document("book_title", "Dune"))
+                    .first()
+            assertEquals("Dune", stored.getString("book_title"))
+            assertEquals("new", stored.getString("status"))
+            assertEquals(listOf("sf"), stored.getList("tag_list", String::class.java))
         }
     }
 

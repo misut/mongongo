@@ -15,6 +15,16 @@ private data class SerialNamedDslBook(
     val year: Int = 0
 )
 
+@Serializable
+private data class SerialNamedUpdateDslBook(
+    @SerialName("_id")
+    val id: BsonObjectId,
+    @SerialName("book_title")
+    val title: String,
+    @SerialName("published_year")
+    val year: Int = 0
+)
+
 class MongoCollectionDslTest {
     @Test
     fun insertOneDslBlockBuildsBsonDocument() = runTest {
@@ -281,6 +291,84 @@ class MongoCollectionDslTest {
                     client.database("library").collection("books").updateMany(filter) {
                         inc("revision", 1)
                     }
+                assertEquals(2L, result.modifiedCount)
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
+    fun updateOneTypedCollectionBlockSendsSerializerMappedUpdateFieldName() = runTest {
+        val id = BsonObjectId.fromHex("000000000000000000000001")
+
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                val update = receive()
+                val statement = update.body["updates"].asBson<BsonArray>().values.single().asBson<BsonDocument>()
+                assertEquals(BsonDocument("_id" to id), statement["q"])
+                assertEquals(
+                    BsonDocument("\$set" to BsonDocument("book_title" to BsonString("Dune"))),
+                    statement["u"]
+                )
+                reply(
+                    update,
+                    BsonDocument(
+                        "ok" to BsonDouble(1.0),
+                        "n" to BsonInt32(1),
+                        "nModified" to BsonInt32(1)
+                    )
+                )
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                val result =
+                    client.database("library").typedCollection<SerialNamedUpdateDslBook>("books").updateOne(
+                        filter = { SerialNamedUpdateDslBook::id eq id },
+                        update = { set(SerialNamedUpdateDslBook::title, "Dune") }
+                    )
+                assertEquals(1L, result.modifiedCount)
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
+    fun updateManyTypedCollectionBlockSendsSerializerMappedUpdateFieldName() = runTest {
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                val update = receive()
+                val statement = update.body["updates"].asBson<BsonArray>().values.single().asBson<BsonDocument>()
+                assertEquals(
+                    BsonDocument("published_year" to BsonDocument("\$gte" to BsonInt32(1965))),
+                    statement["q"]
+                )
+                assertEquals(BsonBoolean(true), statement["multi"])
+                assertEquals(
+                    BsonDocument("\$inc" to BsonDocument("published_year" to BsonInt32(1))),
+                    statement["u"]
+                )
+                reply(
+                    update,
+                    BsonDocument(
+                        "ok" to BsonDouble(1.0),
+                        "n" to BsonInt32(2),
+                        "nModified" to BsonInt32(2)
+                    )
+                )
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                val result =
+                    client.database("library").typedCollection<SerialNamedUpdateDslBook>("books").updateMany(
+                        filter = { SerialNamedUpdateDslBook::year gte 1965 },
+                        update = { inc(SerialNamedUpdateDslBook::year, 1) }
+                    )
                 assertEquals(2L, result.modifiedCount)
             } finally {
                 client.close()

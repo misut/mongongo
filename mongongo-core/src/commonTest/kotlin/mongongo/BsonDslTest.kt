@@ -23,6 +23,20 @@ private data class DslAmbiguousBook(
     val status: String
 )
 
+@Serializable
+private data class DslUpdateBook(
+    @SerialName("book_title")
+    val title: String,
+    @SerialName("draft_notes")
+    val draftNotes: String? = null,
+    @SerialName("published_year")
+    val year: Int = 0,
+    @SerialName("tags_field")
+    val tags: List<String> = emptyList(),
+    @SerialName("authors_field")
+    val authors: List<String> = emptyList()
+)
+
 class BsonDslTest {
     @Test
     fun buildsFilterWithComparisonListAndLogicalOperators() {
@@ -154,6 +168,61 @@ class BsonDslTest {
             )
 
         assertEquals(expected, actual)
+    }
+
+    @Test
+    fun stringBasedUpdateDslUsesLiteralFieldNames() {
+        val actual =
+            update {
+                set("title", "Dune")
+            }
+
+        assertEquals(BsonDocument("\$set" to BsonDocument("title" to BsonString("Dune"))), actual)
+    }
+
+    @Test
+    fun buildsSerializerAwareTypedUpdateOperatorDocument() {
+        val actual =
+            typedUpdate<DslUpdateBook> {
+                set(DslUpdateBook::title, "Dune")
+                unset(DslUpdateBook::draftNotes)
+                inc(DslUpdateBook::year, 1)
+                push(DslUpdateBook::tags, "sf")
+                pull(DslUpdateBook::tags, "draft")
+                addToSet(DslUpdateBook::authors, "Frank Herbert")
+            }
+
+        val expected =
+            BsonDocument(
+                "\$set" to BsonDocument("book_title" to BsonString("Dune")),
+                "\$unset" to BsonDocument("draft_notes" to BsonString("")),
+                "\$inc" to BsonDocument("published_year" to BsonInt32(1)),
+                "\$push" to BsonDocument("tags_field" to BsonString("sf")),
+                "\$pull" to BsonDocument("tags_field" to BsonString("draft")),
+                "\$addToSet" to BsonDocument("authors_field" to BsonString("Frank Herbert"))
+            )
+
+        assertEquals(expected, actual)
+    }
+
+    @Test
+    fun buildsSerializerAwareUpdateWithExplicitSerializer() {
+        val actual =
+            update(DslUpdateBook.serializer()) {
+                set(DslUpdateBook::title, "Dune")
+            }
+
+        assertEquals(BsonDocument("\$set" to BsonDocument("book_title" to BsonString("Dune"))), actual)
+    }
+
+    @Test
+    fun rejectsAmbiguousTypedUpdateFieldLookup() {
+        val failure =
+            assertFailsWith<IllegalArgumentException> {
+                typedUpdate<DslAmbiguousBook> { set(DslAmbiguousBook::title, "Dune") }
+            }
+
+        assertTrue(failure.message.orEmpty().contains("maps ambiguously"))
     }
 
     @Test

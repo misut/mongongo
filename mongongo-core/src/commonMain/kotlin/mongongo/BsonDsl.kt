@@ -20,6 +20,12 @@ public inline fun <reified T : Any> typedFilter(noinline block: TypedBsonFilterB
 public fun update(block: BsonUpdateBuilder.() -> Unit): BsonDocument =
     BsonUpdateBuilder().apply(block).build()
 
+public fun <T : Any> update(serializer: KSerializer<T>, block: TypedBsonUpdateBuilder<T>.() -> Unit): BsonDocument =
+    TypedBsonUpdateBuilder<T>(serializer).apply(block).build()
+
+public inline fun <reified T : Any> typedUpdate(noinline block: TypedBsonUpdateBuilder<T>.() -> Unit): BsonDocument =
+    update(serializer<T>(), block)
+
 public class BsonFilterBuilder internal constructor(
     @PublishedApi internal val fieldNames: BsonFieldNameResolver
 ) {
@@ -254,8 +260,9 @@ private object KotlinPropertyFieldNameResolver : BsonFieldNameResolver {
 private object UnsupportedBsonFieldNameResolver : BsonFieldNameResolver {
     override fun resolve(property: KProperty1<*, *>, valueDescriptor: (() -> SerialDescriptor?)?): String =
         error(
-            "Typed property filter '${property.name}' requires a kotlinx.serialization-backed collection " +
-                "or an explicit serializer via filter(serializer) or typedFilter<T>(); use a string field name for raw BSON filters"
+            "Typed property reference '${property.name}' requires a kotlinx.serialization-backed collection " +
+                "or an explicit serializer via filter(serializer), typedFilter<T>(), update(serializer), or typedUpdate<T>(); " +
+                "use a string field name for raw BSON DSLs"
         )
 }
 
@@ -370,6 +377,96 @@ public class BsonUpdateBuilder {
     }
 }
 
+public class TypedBsonUpdateBuilder<T : Any> internal constructor(
+    @PublishedApi internal val delegate: BsonUpdateBuilder,
+    @PublishedApi internal val fieldNames: BsonFieldNameResolver
+) {
+    internal constructor(serializer: KSerializer<*>) : this(SerializerBsonFieldNameResolver(serializer.descriptor))
+
+    internal constructor(fieldNames: BsonFieldNameResolver) : this(BsonUpdateBuilder(), fieldNames)
+
+    public fun build(): BsonDocument = delegate.build()
+
+    public fun set(name: String, value: Any?) {
+        delegate.set(name, value)
+    }
+
+    public fun unset(name: String) {
+        delegate.unset(name)
+    }
+
+    public fun inc(name: String, amount: Int) {
+        delegate.inc(name, amount)
+    }
+
+    public fun inc(name: String, amount: Long) {
+        delegate.inc(name, amount)
+    }
+
+    public fun inc(name: String, amount: Double) {
+        delegate.inc(name, amount)
+    }
+
+    public fun push(name: String, value: Any?) {
+        delegate.push(name, value)
+    }
+
+    public fun pull(name: String, value: Any?) {
+        delegate.pull(name, value)
+    }
+
+    public fun addToSet(name: String, value: Any?) {
+        delegate.addToSet(name, value)
+    }
+
+    public inline fun <reified V> set(property: KProperty1<T, V>, value: V) {
+        delegate.set(fieldNames.resolve(property, serialDescriptorProvider<V>()), typedBsonValue(value))
+    }
+
+    public inline fun <reified V> unset(property: KProperty1<T, V>) {
+        delegate.unset(fieldNames.resolve(property, serialDescriptorProvider<V>()))
+    }
+
+    public inline fun <reified V : Number> inc(property: KProperty1<T, V>, amount: V) {
+        val name = fieldNames.resolve(property, serialDescriptorProvider<V>())
+        when (amount) {
+            is Int -> delegate.inc(name, amount)
+            is Long -> delegate.inc(name, amount)
+            is Double -> delegate.inc(name, amount)
+            else -> error("Unsupported BSON update increment value ${amount::class.simpleName ?: amount::class.toString()}")
+        }
+    }
+
+    public inline fun <reified P, reified V> push(property: KProperty1<T, P>, value: V) {
+        delegate.push(fieldNames.resolve(property, serialDescriptorProvider<P>()), typedBsonValue(value))
+    }
+
+    public inline fun <reified P, reified V> pull(property: KProperty1<T, P>, value: V) {
+        delegate.pull(fieldNames.resolve(property, serialDescriptorProvider<P>()), typedBsonValue(value))
+    }
+
+    public inline fun <reified P, reified V> addToSet(property: KProperty1<T, P>, value: V) {
+        delegate.addToSet(fieldNames.resolve(property, serialDescriptorProvider<P>()), typedBsonValue(value))
+    }
+}
+
+internal fun <T : Any> propertyRejectingUpdate(block: TypedBsonUpdateBuilder<T>.() -> Unit): BsonDocument =
+    TypedBsonUpdateBuilder<T>(UnsupportedBsonFieldNameResolver).apply(block).build()
+
+@PublishedApi
+internal inline fun <reified V> typedBsonValue(value: V): BsonValue {
+    val valueSerializer =
+        try {
+            serializer<V>()
+        } catch (_: SerializationException) {
+            null
+        } catch (_: IllegalArgumentException) {
+            null
+        }
+    return if (valueSerializer == null) value.toBsonValue() else encodeToBsonValue(valueSerializer, value)
+}
+
+@PublishedApi
 internal fun Any?.toBsonValue(): BsonValue =
     when (this) {
         null -> BsonNull

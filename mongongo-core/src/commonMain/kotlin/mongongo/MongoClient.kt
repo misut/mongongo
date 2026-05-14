@@ -1046,8 +1046,8 @@ public class MongoCollection<T : Any> internal constructor(
     public suspend fun updateOne(
         upsert: Boolean = false,
         filter: TypedBsonFilterBuilder<T>.() -> Unit,
-        update: BsonUpdateBuilder.() -> Unit
-    ): UpdateResult = updateOne(filter = buildFilter(filter), update = mongongo.update(update), upsert = upsert)
+        update: TypedBsonUpdateBuilder<T>.() -> Unit
+    ): UpdateResult = updateOne(filter = buildFilter(filter), update = buildUpdate(update), upsert = upsert)
 
     public suspend fun updateMany(
         filter: BsonDocument,
@@ -1072,8 +1072,8 @@ public class MongoCollection<T : Any> internal constructor(
     public suspend fun updateMany(
         upsert: Boolean = false,
         filter: TypedBsonFilterBuilder<T>.() -> Unit,
-        update: BsonUpdateBuilder.() -> Unit
-    ): UpdateResult = updateMany(filter = buildFilter(filter), update = mongongo.update(update), upsert = upsert)
+        update: TypedBsonUpdateBuilder<T>.() -> Unit
+    ): UpdateResult = updateMany(filter = buildFilter(filter), update = buildUpdate(update), upsert = upsert)
 
     public suspend fun replaceOne(
         filter: BsonDocument,
@@ -1125,6 +1125,12 @@ public class MongoCollection<T : Any> internal constructor(
         when (codec) {
             is KotlinxBsonCodec<*> -> TypedBsonFilterBuilder<T>(codec.serializer).apply(block).build()
             else -> propertyRejectingFilter(block)
+        }
+
+    private fun buildUpdate(block: TypedBsonUpdateBuilder<T>.() -> Unit): BsonDocument =
+        when (codec) {
+            is KotlinxBsonCodec<*> -> TypedBsonUpdateBuilder<T>(codec.serializer).apply(block).build()
+            else -> propertyRejectingUpdate(block)
         }
 
     public suspend fun drop(): MongoCommandResult =
