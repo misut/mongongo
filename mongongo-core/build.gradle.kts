@@ -45,8 +45,6 @@ kotlin {
     }
 }
 
-val emptyJavadocJar by tasks.registering(Jar::class) { archiveClassifier.set("javadoc") }
-
 publishing {
     repositories {
         val publishingUrl = providers.gradleProperty("mavenPublishingRepositoryUrl").orNull
@@ -54,15 +52,25 @@ publishing {
             maven {
                 name = "MavenCentral"
                 url = uri(publishingUrl)
-                credentials {
-                    username = providers.gradleProperty("mavenPublishingUsername").orNull
-                    password = providers.gradleProperty("mavenPublishingPassword").orNull
+                val publishingUsername = providers.gradleProperty("mavenPublishingUsername").orNull
+                val publishingPassword = providers.gradleProperty("mavenPublishingPassword").orNull
+                if (!publishingUsername.isNullOrBlank() || !publishingPassword.isNullOrBlank()) {
+                    credentials {
+                        username = publishingUsername
+                        password = publishingPassword
+                    }
                 }
             }
         }
     }
 
     publications.withType<MavenPublication>().configureEach {
+        val publication = this
+        val emptyJavadocJar =
+            tasks.register<Jar>("${publication.name}JavadocJar") {
+                archiveBaseName.set(providers.provider { publication.artifactId })
+                archiveClassifier.set("javadoc")
+            }
         artifact(emptyJavadocJar)
 
         pom {
