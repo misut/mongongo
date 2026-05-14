@@ -35,9 +35,7 @@ Unsupported or limited in this v0 surface:
 
 - connection pooling
 - retryable writes
-- transient transaction retries and unknown commit result retries
 - causal consistency `operationTime` / `$clusterTime` tracking
-- full server session pooling
 - change streams
 - aggregation
 - typed serialization beyond the v0 mapping listed below
@@ -324,16 +322,32 @@ MONGONGO_TEST_URI=mongodb://127.0.0.1:27017 mise exec -- ./gradlew :mongongo-cor
 
 Optional smoke URIs used by tests:
 
-- `MONGONGO_AUTH_TEST_URI`
-- `MONGONGO_TLS_TEST_URI`
-- `MONGONGO_AUTH_TLS_TEST_URI`
-- `MONGONGO_SRV_TEST_URI`
-- `MONGONGO_AUTH_SRV_TEST_URI`
+| Environment variable | Expected deployment |
+| --- | --- |
+| `MONGONGO_TEST_URI` | Plain MongoDB URI for ping, CRUD, typed CRUD, database, index, and session smoke coverage |
+| `MONGONGO_AUTH_TEST_URI` | MongoDB URI with SCRAM-SHA-256 credentials |
+| `MONGONGO_TLS_TEST_URI` | MongoDB URI that requires TLS |
+| `MONGONGO_AUTH_TLS_TEST_URI` | MongoDB URI that requires SCRAM-SHA-256 credentials and TLS |
+| `MONGONGO_SRV_TEST_URI` | `mongodb+srv://` URI |
+| `MONGONGO_AUTH_SRV_TEST_URI` | `mongodb+srv://` URI with SCRAM-SHA-256 credentials |
+| `MONGONGO_TRANSACTION_TEST_URI` | Replica set or sharded MongoDB URI that supports transactions |
+
+When an environment variable is unset, the matching smoke test returns without
+opening a network connection. `MONGONGO_TRANSACTION_TEST_URI` is separate from
+`MONGONGO_TEST_URI` so standalone local MongoDB can cover plain CRUD smoke while
+a replica-set URI is required for transaction commit and abort coverage.
 
 Example:
 
 ```sh
 MONGONGO_AUTH_TEST_URI='mongodb://user:p%40ssword@127.0.0.1:27017/app?authSource=admin' \
+    mise exec -- ./gradlew :mongongo-core:macosArm64Test --rerun-tasks
+```
+
+Transaction smoke example:
+
+```sh
+MONGONGO_TRANSACTION_TEST_URI='mongodb://127.0.0.1:27017/app?replicaSet=rs0' \
     mise exec -- ./gradlew :mongongo-core:macosArm64Test --rerun-tasks
 ```
 

@@ -792,49 +792,42 @@ class NativeMongoSmokeTest {
 
     @Test
     fun commitsAndAbortsTransactionConfiguredMongoUri() = runTest {
-        val uri = environment("MONGONGO_TEST_URI") ?: return@runTest
+        val uri = environment("MONGONGO_TRANSACTION_TEST_URI") ?: return@runTest
         val client = MongoClient.connect(uri)
         try {
-            try {
-                val committedCollection =
-                    client
-                        .database("mongongo_native_smoke")
-                        .collection("transaction_commit_${Random.nextInt(0, Int.MAX_VALUE)}")
-                val abortedCollection =
-                    client
-                        .database("mongongo_native_smoke")
-                        .collection("transaction_abort_${Random.nextInt(0, Int.MAX_VALUE)}")
+            val committedCollection =
+                client
+                    .database("mongongo_native_smoke")
+                    .collection("transaction_commit_${Random.nextInt(0, Int.MAX_VALUE)}")
+            val abortedCollection =
+                client
+                    .database("mongongo_native_smoke")
+                    .collection("transaction_abort_${Random.nextInt(0, Int.MAX_VALUE)}")
 
-                val committedId =
+            val committedId =
+                client.withTransaction {
+                    val insertResult =
+                        database("mongongo_native_smoke")
+                            .collection(committedCollection.name)
+                            .insertOne(BsonDocument("name" to BsonString("committed")))
+                    assertIs<BsonObjectId>(insertResult.insertedId)
+                }
+            assertEquals(BsonString("committed"), committedCollection.findOne(BsonDocument("_id" to committedId))?.get("name"))
+
+            var abortedId: BsonObjectId? = null
+            val failure =
+                assertFailsWith<IllegalStateException> {
                     client.withTransaction {
                         val insertResult =
                             database("mongongo_native_smoke")
-                                .collection(committedCollection.name)
-                                .insertOne(BsonDocument("name" to BsonString("committed")))
-                        assertIs<BsonObjectId>(insertResult.insertedId)
+                                .collection(abortedCollection.name)
+                                .insertOne(BsonDocument("name" to BsonString("aborted")))
+                        abortedId = assertIs<BsonObjectId>(insertResult.insertedId)
+                        error("rollback")
                     }
-                assertEquals(BsonString("committed"), committedCollection.findOne(BsonDocument("_id" to committedId))?.get("name"))
-
-                var abortedId: BsonObjectId? = null
-                val failure =
-                    assertFailsWith<IllegalStateException> {
-                        client.withTransaction {
-                            val insertResult =
-                                database("mongongo_native_smoke")
-                                    .collection(abortedCollection.name)
-                                    .insertOne(BsonDocument("name" to BsonString("aborted")))
-                            abortedId = assertIs<BsonObjectId>(insertResult.insertedId)
-                            error("rollback")
-                        }
-                    }
-                assertEquals("rollback", failure.message)
-                assertNull(abortedCollection.findOne(BsonDocument("_id" to abortedId!!)))
-            } catch (exception: MongoCommandException) {
-                if (exception.isTransactionSupportFailure()) {
-                    return@runTest
                 }
-                throw exception
-            }
+            assertEquals("rollback", failure.message)
+            assertNull(abortedCollection.findOne(BsonDocument("_id" to abortedId!!)))
         } finally {
             client.close()
         }
@@ -1135,16 +1128,3 @@ private fun nativeSessionId(): BsonDocument =
                 bytes = (16 until 32).map { it.toByte() }
             )
     )
-
-private fun MongoCommandException.isTransactionSupportFailure(): Boolean {
-    val codeName = result.getString("codeName").orEmpty()
-    val message = result.getString("errmsg").orEmpty()
-    return listOf(codeName, message).any { value ->
-        value.contains("Transaction", ignoreCase = true) &&
-            (
-                value.contains("replica", ignoreCase = true) ||
-                    value.contains("support", ignoreCase = true) ||
-                    value.contains("shard", ignoreCase = true)
-            )
-    }
-}
