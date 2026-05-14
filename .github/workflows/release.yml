@@ -1,0 +1,140 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Release validation
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up JDK
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Select Xcode 16
+        run: |
+          sudo xcode-select -s /Applications/Xcode_16.2.app
+          xcodebuild -version
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-provider: basic
+
+      - name: Run release validation
+        run: |
+          ./gradlew :mongongo-core:spotlessCheck :mongongo-core:jvmTest :mongongo-core:macosArm64Test
+          ./gradlew :mongongo-core:publishToMavenLocal
+
+  publish:
+    name: Publish Maven artifacts
+    needs: validate
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up JDK
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Select Xcode 16
+        run: |
+          sudo xcode-select -s /Applications/Xcode_16.2.app
+          xcodebuild -version
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-provider: basic
+
+      - name: Check Maven publish secrets
+        shell: bash
+        env:
+          MAVEN_PUBLISHING_REPOSITORY_URL: ${{ secrets.MAVEN_PUBLISHING_REPOSITORY_URL }}
+          MAVEN_PUBLISHING_USERNAME: ${{ secrets.MAVEN_PUBLISHING_USERNAME }}
+          MAVEN_PUBLISHING_PASSWORD: ${{ secrets.MAVEN_PUBLISHING_PASSWORD }}
+          SIGNING_IN_MEMORY_KEY: ${{ secrets.SIGNING_IN_MEMORY_KEY }}
+          SIGNING_IN_MEMORY_KEY_PASSWORD: ${{ secrets.SIGNING_IN_MEMORY_KEY_PASSWORD }}
+        run: |
+          missing=()
+          for name in \
+            MAVEN_PUBLISHING_REPOSITORY_URL \
+            MAVEN_PUBLISHING_USERNAME \
+            MAVEN_PUBLISHING_PASSWORD \
+            SIGNING_IN_MEMORY_KEY \
+            SIGNING_IN_MEMORY_KEY_PASSWORD
+          do
+            if [ -z "${!name}" ]; then
+              missing+=("$name")
+            fi
+          done
+
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::Missing Maven publish secrets: ${missing[*]}"
+            {
+              echo "### Maven publish blocked"
+              echo
+              echo "Missing required secrets:"
+              for name in "${missing[@]}"; do
+                echo "- \`$name\`"
+              done
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+      - name: Publish Maven artifacts
+        env:
+          ORG_GRADLE_PROJECT_mavenPublishingRepositoryUrl: ${{ secrets.MAVEN_PUBLISHING_REPOSITORY_URL }}
+          ORG_GRADLE_PROJECT_mavenPublishingUsername: ${{ secrets.MAVEN_PUBLISHING_USERNAME }}
+          ORG_GRADLE_PROJECT_mavenPublishingPassword: ${{ secrets.MAVEN_PUBLISHING_PASSWORD }}
+          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.SIGNING_IN_MEMORY_KEY }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNING_IN_MEMORY_KEY_PASSWORD }}
+        run: ./gradlew :mongongo-core:publishAllPublicationsToMavenCentralRepository
+
+  github-release:
+    name: Create GitHub Release
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            gh release edit "$TAG_NAME" \
+              --title "$TAG_NAME" \
+              --notes-file docs/release-notes/v0.1.md
+          else
+            gh release create "$TAG_NAME" \
+              --verify-tag \
+              --title "$TAG_NAME" \
+              --notes-file docs/release-notes/v0.1.md
+          fi
