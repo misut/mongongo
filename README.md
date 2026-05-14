@@ -189,6 +189,7 @@ import mongongo.MongoClient
 data class Book(
     @SerialName("_id")
     val id: BsonObjectId? = null,
+    @SerialName("book_title")
     val title: String,
     val status: String = "draft",
     val tags: List<String> = emptyList()
@@ -213,10 +214,13 @@ serialization exception. Missing default-valued fields decode through the
 generated serializer defaults; unknown BSON fields such as MongoDB-generated
 `_id` are ignored when the target serializer has no matching property.
 
-Typed property filters currently use the Kotlin property name, so
-`Book::title eq "Dawn"` maps to `{ "title": "Dawn" }`. Use string field names
-when you need serializer-driven names from `@SerialName` until typed filter
-field-name mapping is added.
+Typed property filters on serialization-backed collections resolve field names
+through the collection serializer, so `Book::title eq "Dawn"` maps to
+`{ "book_title": "Dawn" }` when the property has `@SerialName("book_title")`.
+Use `typedFilter<Book> { ... }` when you need a standalone `BsonDocument` with
+the same mapping. Raw string filters such as `"title" eq "Dawn"` remain literal
+field names. Unsupported property references fail instead of falling back to a
+possibly wrong Kotlin property name.
 
 ### update DSL
 

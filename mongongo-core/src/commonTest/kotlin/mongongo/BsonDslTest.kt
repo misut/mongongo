@@ -1,9 +1,27 @@
 package mongongo
 
+import kotlinx.serialization.SerialName
+import kotlinx.serialization.Serializable
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
+
+@Serializable
+private data class DslMappedBook(
+    @SerialName("book_title")
+    val title: String,
+    val year: Int,
+    val edition: Int,
+    val archived: Boolean = false
+)
+
+@Serializable
+private data class DslAmbiguousBook(
+    @SerialName("primary")
+    val title: String,
+    val status: String
+)
 
 class BsonDslTest {
     @Test
@@ -50,6 +68,60 @@ class BsonDslTest {
             BsonDocument("title" to BsonDocument("\$eq" to BsonString("Kindred"), "\$ne" to BsonString("Dawn"))),
             actual
         )
+    }
+
+    @Test
+    fun buildsSerializerAwareTypedPropertyFilters() {
+        val actual =
+            filter(DslMappedBook.serializer()) {
+                DslMappedBook::title eq "Dune"
+                DslMappedBook::title ne "Dawn"
+                DslMappedBook::year gt 1950
+                DslMappedBook::year gte 1965
+                DslMappedBook::year lt 1970
+                DslMappedBook::year lte 1966
+                DslMappedBook::edition inList listOf(1, 2)
+                and(typedFilter<DslMappedBook> { DslMappedBook::edition eq 1 })
+                or(
+                    typedFilter<DslMappedBook> { DslMappedBook::year eq 1965 },
+                    typedFilter<DslMappedBook> { DslMappedBook::year eq 1966 }
+                )
+                not { DslMappedBook::archived eq true }
+            }
+
+        assertEquals(
+            BsonDocument(
+                "book_title" to BsonDocument("\$eq" to BsonString("Dune"), "\$ne" to BsonString("Dawn")),
+                "year" to
+                    BsonDocument(
+                        "\$gt" to BsonInt32(1950),
+                        "\$gte" to BsonInt32(1965),
+                        "\$lt" to BsonInt32(1970),
+                        "\$lte" to BsonInt32(1966)
+                    ),
+                "edition" to BsonDocument("\$in" to BsonArray(listOf(BsonInt32(1), BsonInt32(2)))),
+                "\$and" to BsonArray(listOf(BsonDocument("edition" to BsonInt32(1)))),
+                "\$or" to
+                    BsonArray(
+                        listOf(
+                            BsonDocument("year" to BsonInt32(1965)),
+                            BsonDocument("year" to BsonInt32(1966))
+                        )
+                    ),
+                "\$nor" to BsonArray(listOf(BsonDocument("archived" to BsonBoolean(true))))
+            ),
+            actual
+        )
+    }
+
+    @Test
+    fun rejectsAmbiguousSerializerFieldLookup() {
+        val failure =
+            assertFailsWith<IllegalArgumentException> {
+                typedFilter<DslAmbiguousBook> { DslAmbiguousBook::title eq "Dune" }
+            }
+
+        assertTrue(failure.message.orEmpty().contains("maps ambiguously"))
     }
 
     @Test

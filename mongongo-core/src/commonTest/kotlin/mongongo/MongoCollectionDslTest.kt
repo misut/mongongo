@@ -1,9 +1,19 @@
 package mongongo
 
 import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.SerialName
+import kotlinx.serialization.Serializable
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
+
+@Serializable
+private data class SerialNamedDslBook(
+    @SerialName("book_title")
+    val title: String,
+    @SerialName("published_year")
+    val year: Int = 0
+)
 
 class MongoCollectionDslTest {
     @Test
@@ -78,6 +88,43 @@ class MongoCollectionDslTest {
     }
 
     @Test
+    fun findOneTypedCollectionBlockSendsSerializerMappedFieldName() = runTest {
+        val found = BsonDocument("book_title" to BsonString("Dune"))
+
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                val find = receive()
+                assertEquals(BsonDocument("book_title" to BsonString("Dune")), find.body["filter"])
+                reply(
+                    find,
+                    BsonDocument(
+                        "cursor" to
+                            BsonDocument(
+                                "id" to BsonInt64(0),
+                                "ns" to BsonString("library.books"),
+                                "firstBatch" to BsonArray(listOf(found))
+                            ),
+                        "ok" to BsonDouble(1.0)
+                    )
+                )
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                val result =
+                    client
+                        .database("library")
+                        .typedCollection<SerialNamedDslBook>("books")
+                        .findOne { SerialNamedDslBook::title eq "Dune" }
+                assertEquals(SerialNamedDslBook("Dune"), result)
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
     fun findDslBlockPreservesOptionsAndSendsBuiltFilter() = runTest {
         withFakeMongoServer(
             handler = {
@@ -111,6 +158,56 @@ class MongoCollectionDslTest {
                         }
                         .toList()
                 assertEquals(emptyList(), result)
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
+    fun findTypedCollectionBlockSendsSerializerMappedFieldName() = runTest {
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                val find = receive()
+                assertEquals(
+                    BsonDocument("published_year" to BsonDocument("\$gte" to BsonInt32(1965))),
+                    find.body["filter"]
+                )
+                assertEquals(BsonInt32(2), find.body["limit"])
+                reply(
+                    find,
+                    BsonDocument(
+                        "cursor" to
+                            BsonDocument(
+                                "id" to BsonInt64(0),
+                                "ns" to BsonString("library.books"),
+                                "firstBatch" to
+                                    BsonArray(
+                                        listOf(
+                                            BsonDocument(
+                                                "book_title" to BsonString("Dune"),
+                                                "published_year" to BsonInt32(1965)
+                                            )
+                                        )
+                                    )
+                            ),
+                        "ok" to BsonDouble(1.0)
+                    )
+                )
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                val result =
+                    client
+                        .database("library")
+                        .typedCollection<SerialNamedDslBook>("books")
+                        .find(limit = 2) {
+                            SerialNamedDslBook::year gte 1965
+                        }
+                        .toList()
+                assertEquals(listOf(SerialNamedDslBook("Dune", 1965)), result)
             } finally {
                 client.close()
             }

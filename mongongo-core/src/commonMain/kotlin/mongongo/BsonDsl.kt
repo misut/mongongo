@@ -1,14 +1,30 @@
+@file:OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+
 package mongongo
 
+import kotlinx.serialization.KSerializer
+import kotlinx.serialization.SerializationException
+import kotlinx.serialization.descriptors.SerialDescriptor
+import kotlinx.serialization.serializer
 import kotlin.reflect.KProperty1
 
 public fun filter(block: BsonFilterBuilder.() -> Unit): BsonDocument =
     BsonFilterBuilder().apply(block).build()
 
+public fun <T : Any> filter(serializer: KSerializer<T>, block: TypedBsonFilterBuilder<T>.() -> Unit): BsonDocument =
+    TypedBsonFilterBuilder<T>(serializer).apply(block).build()
+
+public inline fun <reified T : Any> typedFilter(noinline block: TypedBsonFilterBuilder<T>.() -> Unit): BsonDocument =
+    filter(serializer<T>(), block)
+
 public fun update(block: BsonUpdateBuilder.() -> Unit): BsonDocument =
     BsonUpdateBuilder().apply(block).build()
 
-public class BsonFilterBuilder {
+public class BsonFilterBuilder internal constructor(
+    @PublishedApi internal val fieldNames: BsonFieldNameResolver
+) {
+    public constructor() : this(KotlinPropertyFieldNameResolver)
+
     private val values = linkedMapOf<String, BsonValue>()
 
     public fun build(): BsonDocument = BsonDocument(values.toMap())
@@ -46,35 +62,35 @@ public class BsonFilterBuilder {
     }
 
     public infix fun <T : Any, V> KProperty1<T, V>.eq(value: V) {
-        name eq value
+        fieldNames.resolve(this, valueDescriptor = null) eq value
     }
 
     public infix fun <T : Any, V> KProperty1<T, V>.ne(value: V) {
-        name ne value
+        fieldNames.resolve(this, valueDescriptor = null) ne value
     }
 
     public infix fun <T : Any, V> KProperty1<T, V>.gt(value: V) {
-        name gt value
+        fieldNames.resolve(this, valueDescriptor = null) gt value
     }
 
     public infix fun <T : Any, V> KProperty1<T, V>.gte(value: V) {
-        name gte value
+        fieldNames.resolve(this, valueDescriptor = null) gte value
     }
 
     public infix fun <T : Any, V> KProperty1<T, V>.lt(value: V) {
-        name lt value
+        fieldNames.resolve(this, valueDescriptor = null) lt value
     }
 
     public infix fun <T : Any, V> KProperty1<T, V>.lte(value: V) {
-        name lte value
+        fieldNames.resolve(this, valueDescriptor = null) lte value
     }
 
     public infix fun <T : Any, V> KProperty1<T, V>.inList(values: Iterable<V>) {
-        name inList values
+        fieldNames.resolve(this, valueDescriptor = null) inList values
     }
 
     public infix fun <T : Any, V> KProperty1<T, V>.nin(values: Iterable<V>) {
-        name nin values
+        fieldNames.resolve(this, valueDescriptor = null) nin values
     }
 
     public fun and(vararg filters: BsonDocument) {
@@ -90,7 +106,7 @@ public class BsonFilterBuilder {
     }
 
     public fun not(block: BsonFilterBuilder.() -> Unit) {
-        not(filter(block))
+        not(BsonFilterBuilder(fieldNames).apply(block).build())
     }
 
     private fun setField(name: String, value: BsonValue) {
@@ -122,6 +138,191 @@ public class BsonFilterBuilder {
         values[operator] = BsonArray(clauses)
     }
 }
+
+public class TypedBsonFilterBuilder<T : Any> internal constructor(
+    @PublishedApi internal val delegate: BsonFilterBuilder,
+    @PublishedApi internal val fieldNames: BsonFieldNameResolver
+) {
+    internal constructor(serializer: KSerializer<*>) : this(SerializerBsonFieldNameResolver(serializer.descriptor))
+
+    internal constructor(fieldNames: BsonFieldNameResolver) : this(BsonFilterBuilder(fieldNames), fieldNames)
+
+    public fun build(): BsonDocument = delegate.build()
+
+    public infix fun String.eq(value: Any?) {
+        val field = this
+        delegate.run { field eq value }
+    }
+
+    public infix fun String.ne(value: Any?) {
+        val field = this
+        delegate.run { field ne value }
+    }
+
+    public infix fun String.gt(value: Any?) {
+        val field = this
+        delegate.run { field gt value }
+    }
+
+    public infix fun String.gte(value: Any?) {
+        val field = this
+        delegate.run { field gte value }
+    }
+
+    public infix fun String.lt(value: Any?) {
+        val field = this
+        delegate.run { field lt value }
+    }
+
+    public infix fun String.lte(value: Any?) {
+        val field = this
+        delegate.run { field lte value }
+    }
+
+    public infix fun String.inList(values: Iterable<Any?>) {
+        val field = this
+        delegate.run { field inList values }
+    }
+
+    public infix fun String.nin(values: Iterable<Any?>) {
+        val field = this
+        delegate.run { field nin values }
+    }
+
+    public inline infix fun <reified V> KProperty1<T, V>.eq(value: V) {
+        fieldNames.resolve(this, valueDescriptor = serialDescriptorProvider<V>()) eq value
+    }
+
+    public inline infix fun <reified V> KProperty1<T, V>.ne(value: V) {
+        fieldNames.resolve(this, valueDescriptor = serialDescriptorProvider<V>()) ne value
+    }
+
+    public inline infix fun <reified V> KProperty1<T, V>.gt(value: V) {
+        fieldNames.resolve(this, valueDescriptor = serialDescriptorProvider<V>()) gt value
+    }
+
+    public inline infix fun <reified V> KProperty1<T, V>.gte(value: V) {
+        fieldNames.resolve(this, valueDescriptor = serialDescriptorProvider<V>()) gte value
+    }
+
+    public inline infix fun <reified V> KProperty1<T, V>.lt(value: V) {
+        fieldNames.resolve(this, valueDescriptor = serialDescriptorProvider<V>()) lt value
+    }
+
+    public inline infix fun <reified V> KProperty1<T, V>.lte(value: V) {
+        fieldNames.resolve(this, valueDescriptor = serialDescriptorProvider<V>()) lte value
+    }
+
+    public inline infix fun <reified V> KProperty1<T, V>.inList(values: Iterable<V>) {
+        fieldNames.resolve(this, valueDescriptor = serialDescriptorProvider<V>()) inList values
+    }
+
+    public inline infix fun <reified V> KProperty1<T, V>.nin(values: Iterable<V>) {
+        fieldNames.resolve(this, valueDescriptor = serialDescriptorProvider<V>()) nin values
+    }
+
+    public fun and(vararg filters: BsonDocument) {
+        delegate.and(*filters)
+    }
+
+    public fun or(vararg filters: BsonDocument) {
+        delegate.or(*filters)
+    }
+
+    public fun not(filter: BsonDocument) {
+        delegate.not(filter)
+    }
+
+    public fun not(block: TypedBsonFilterBuilder<T>.() -> Unit) {
+        not(TypedBsonFilterBuilder<T>(fieldNames).apply(block).build())
+    }
+}
+
+internal fun <T : Any> propertyRejectingFilter(block: TypedBsonFilterBuilder<T>.() -> Unit): BsonDocument =
+    TypedBsonFilterBuilder<T>(UnsupportedBsonFieldNameResolver).apply(block).build()
+
+@PublishedApi
+internal fun interface BsonFieldNameResolver {
+    fun resolve(property: KProperty1<*, *>, valueDescriptor: (() -> SerialDescriptor?)?): String
+}
+
+private object KotlinPropertyFieldNameResolver : BsonFieldNameResolver {
+    override fun resolve(property: KProperty1<*, *>, valueDescriptor: (() -> SerialDescriptor?)?): String =
+        property.name
+}
+
+private object UnsupportedBsonFieldNameResolver : BsonFieldNameResolver {
+    override fun resolve(property: KProperty1<*, *>, valueDescriptor: (() -> SerialDescriptor?)?): String =
+        error(
+            "Typed property filter '${property.name}' requires a kotlinx.serialization-backed collection " +
+                "or an explicit serializer via filter(serializer) or typedFilter<T>(); use a string field name for raw BSON filters"
+        )
+}
+
+private class SerializerBsonFieldNameResolver(
+    private val descriptor: SerialDescriptor
+) : BsonFieldNameResolver {
+    override fun resolve(property: KProperty1<*, *>, valueDescriptor: (() -> SerialDescriptor?)?): String {
+        val directMatches = descriptor.elementIndicesMatching(property.name)
+        require(directMatches.size <= 1) {
+            "Property '${property.name}' maps ambiguously to BSON field '${property.name}' through serializer " +
+                descriptor.serialName
+        }
+        if (directMatches.size == 1) {
+            return descriptor.getElementName(directMatches.single())
+        }
+
+        val inferredMatches = valueDescriptor?.invoke()?.let(::elementIndicesMatchingValueDescriptor).orEmpty()
+        val hintedMatches =
+            inferredMatches.filter { index ->
+                descriptor.getElementName(index).normalizedFieldName().contains(property.name.normalizedFieldName())
+            }
+        val matches = if (hintedMatches.isNotEmpty()) hintedMatches else inferredMatches
+
+        require(matches.size == 1) {
+            when {
+                matches.isEmpty() ->
+                    "Property '${property.name}' cannot be mapped through serializer ${descriptor.serialName}; " +
+                        "descriptor fields are ${descriptor.elementNamesForMessage()}"
+                else ->
+                    "Property '${property.name}' maps ambiguously through serializer ${descriptor.serialName}; " +
+                        "candidate BSON fields are ${matches.joinToString(prefix = "[", postfix = "]") { descriptor.getElementName(it) }}"
+            }
+        }
+
+        return descriptor.getElementName(matches.single())
+    }
+
+    private fun elementIndicesMatchingValueDescriptor(valueDescriptor: SerialDescriptor): List<Int> =
+        (0 until descriptor.elementsCount).filter { index ->
+            descriptor.getElementDescriptor(index).matchesValueDescriptor(valueDescriptor)
+        }
+}
+
+@PublishedApi
+internal inline fun <reified V> serialDescriptorProvider(): () -> SerialDescriptor? =
+    {
+        try {
+            serializer<V>().descriptor
+        } catch (_: SerializationException) {
+            null
+        } catch (_: IllegalArgumentException) {
+            null
+        }
+    }
+
+private fun SerialDescriptor.matchesValueDescriptor(other: SerialDescriptor): Boolean =
+    this == other ||
+        (serialName == other.serialName && kind == other.kind && isNullable == other.isNullable)
+
+private fun String.normalizedFieldName(): String =
+    filter { char -> char.isLetterOrDigit() }.lowercase()
+
+private fun SerialDescriptor.elementIndicesMatching(name: String): List<Int> =
+    (0 until elementsCount).filter { index -> getElementName(index) == name }
+
+private fun SerialDescriptor.elementNamesForMessage(): String =
+    (0 until elementsCount).joinToString(prefix = "[", postfix = "]") { index -> getElementName(index) }
 
 public class BsonUpdateBuilder {
     private val operators = linkedMapOf<String, LinkedHashMap<String, BsonValue>>()

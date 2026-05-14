@@ -998,8 +998,8 @@ public class MongoCollection<T : Any> internal constructor(
             ordered = ordered
         )
 
-    public suspend fun deleteOne(block: BsonFilterBuilder.() -> Unit): DeleteResult =
-        deleteOne(filter(block))
+    public suspend fun deleteOne(block: TypedBsonFilterBuilder<T>.() -> Unit): DeleteResult =
+        deleteOne(buildFilter(block))
 
     public suspend fun deleteOne(filter: BsonDocument): DeleteResult =
         database.context.client.deleteOne(
@@ -1011,8 +1011,8 @@ public class MongoCollection<T : Any> internal constructor(
 
     public suspend fun deleteMany(
         ordered: Boolean = true,
-        block: BsonFilterBuilder.() -> Unit
-    ): DeleteResult = deleteMany(filter = filter(block), ordered = ordered)
+        block: TypedBsonFilterBuilder<T>.() -> Unit
+    ): DeleteResult = deleteMany(filter = buildFilter(block), ordered = ordered)
 
     public suspend fun deleteMany(filter: BsonDocument, ordered: Boolean = true): DeleteResult =
         database.context.client.deleteMany(
@@ -1045,9 +1045,9 @@ public class MongoCollection<T : Any> internal constructor(
 
     public suspend fun updateOne(
         upsert: Boolean = false,
-        filter: BsonFilterBuilder.() -> Unit,
+        filter: TypedBsonFilterBuilder<T>.() -> Unit,
         update: BsonUpdateBuilder.() -> Unit
-    ): UpdateResult = updateOne(filter = mongongo.filter(filter), update = mongongo.update(update), upsert = upsert)
+    ): UpdateResult = updateOne(filter = buildFilter(filter), update = mongongo.update(update), upsert = upsert)
 
     public suspend fun updateMany(
         filter: BsonDocument,
@@ -1071,9 +1071,9 @@ public class MongoCollection<T : Any> internal constructor(
 
     public suspend fun updateMany(
         upsert: Boolean = false,
-        filter: BsonFilterBuilder.() -> Unit,
+        filter: TypedBsonFilterBuilder<T>.() -> Unit,
         update: BsonUpdateBuilder.() -> Unit
-    ): UpdateResult = updateMany(filter = mongongo.filter(filter), update = mongongo.update(update), upsert = upsert)
+    ): UpdateResult = updateMany(filter = buildFilter(filter), update = mongongo.update(update), upsert = upsert)
 
     public suspend fun replaceOne(
         filter: BsonDocument,
@@ -1089,8 +1089,8 @@ public class MongoCollection<T : Any> internal constructor(
             upsert = upsert
         )
 
-    public suspend fun findOne(block: BsonFilterBuilder.() -> Unit): T? =
-        findOne(filter(block))
+    public suspend fun findOne(block: TypedBsonFilterBuilder<T>.() -> Unit): T? =
+        findOne(buildFilter(block))
 
     public suspend fun findOne(filter: BsonDocument = BsonDocument()): T? =
         database.context.client.findOne(
@@ -1118,8 +1118,14 @@ public class MongoCollection<T : Any> internal constructor(
     public suspend fun find(
         limit: Int = 0,
         batchSize: Int? = null,
-        block: BsonFilterBuilder.() -> Unit
-    ): MongoCursor<T> = find(filter = filter(block), limit = limit, batchSize = batchSize)
+        block: TypedBsonFilterBuilder<T>.() -> Unit
+    ): MongoCursor<T> = find(filter = buildFilter(block), limit = limit, batchSize = batchSize)
+
+    private fun buildFilter(block: TypedBsonFilterBuilder<T>.() -> Unit): BsonDocument =
+        when (codec) {
+            is KotlinxBsonCodec<*> -> TypedBsonFilterBuilder<T>(codec.serializer).apply(block).build()
+            else -> propertyRejectingFilter(block)
+        }
 
     public suspend fun drop(): MongoCommandResult =
         database.context.client.dropCollection(context = database.context, database = database.name, collection = name)
