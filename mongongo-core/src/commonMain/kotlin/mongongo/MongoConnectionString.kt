@@ -18,7 +18,11 @@ internal interface MongoDnsResolver {
     fun lookupTxt(name: String): List<String>
 }
 
-internal expect object SystemMongoDnsResolver : MongoDnsResolver
+internal expect object SystemMongoDnsResolver : MongoDnsResolver {
+    override fun lookupSrv(name: String): List<MongoSrvRecord>
+
+    override fun lookupTxt(name: String): List<String>
+}
 
 internal class MongoDnsException(
     message: String,

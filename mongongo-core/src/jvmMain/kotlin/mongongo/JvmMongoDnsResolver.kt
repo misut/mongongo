@@ -7,7 +7,7 @@ import javax.naming.directory.Attribute
 import javax.naming.directory.InitialDirContext
 
 internal actual object SystemMongoDnsResolver : MongoDnsResolver {
-    override fun lookupSrv(name: String): List<MongoSrvRecord> {
+    actual override fun lookupSrv(name: String): List<MongoSrvRecord> {
         val values = lookupAttribute(name = name, attributeName = "SRV")
         return values.map { value ->
             val parts = value.trim().split(Regex("\\s+"))
@@ -19,7 +19,7 @@ internal actual object SystemMongoDnsResolver : MongoDnsResolver {
         }
     }
 
-    override fun lookupTxt(name: String): List<String> =
+    actual override fun lookupTxt(name: String): List<String> =
         lookupAttribute(name = name, attributeName = "TXT").map(::decodeTxtRecord)
 
     private fun lookupAttribute(name: String, attributeName: String): List<String> {
