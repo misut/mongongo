@@ -1,7 +1,11 @@
 import com.diffplug.gradle.spotless.SpotlessExtension
 
+val mongongoGroup = providers.gradleProperty("mongongo.group").get()
+val mongongoVersion = providers.gradleProperty("mongongo.version").get()
+
 allprojects {
-    group = "mongongo"
+    group = mongongoGroup
+    version = mongongoVersion
 
     repositories {
         google()

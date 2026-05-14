@@ -39,7 +39,7 @@ import kotlin.time.TimeSource
 
 @OptIn(ExperimentalForeignApi::class)
 internal actual object SystemMongoDnsResolver : MongoDnsResolver {
-    override fun lookupSrv(name: String): List<MongoSrvRecord> =
+    actual override fun lookupSrv(name: String): List<MongoSrvRecord> =
         query(name = name, type = kDNSServiceType_SRV.toUShort()).map { bytes ->
             require(bytes.size >= 7) { "Invalid DNS SRV record for $name" }
             MongoSrvRecord(
@@ -48,7 +48,7 @@ internal actual object SystemMongoDnsResolver : MongoDnsResolver {
             )
         }
 
-    override fun lookupTxt(name: String): List<String> =
+    actual override fun lookupTxt(name: String): List<String> =
         query(name = name, type = kDNSServiceType_TXT.toUShort()).map(::readTxtRecord)
 
     private fun query(name: String, type: UShort): List<ByteArray> {
