@@ -34,7 +34,6 @@ Run `macosArm64Test` on a macOS Arm64 host.
 
 Unsupported or limited in this v0 surface:
 
-- published Maven coordinates
 - connection pooling
 - retryable writes
 - causal consistency `operationTime` / `$clusterTime` tracking
@@ -46,6 +45,31 @@ Unsupported or limited in this v0 surface:
 - x509, AWS, GSSAPI, and PLAIN authentication
 - SRV polling after connect
 
+## Install
+
+mongongo v0.1.0 publishes the Kotlin Multiplatform root artifact:
+
+```kotlin
+repositories {
+    mavenCentral()
+}
+
+kotlin {
+    sourceSets {
+        commonMain.dependencies {
+            implementation("io.github.misut:mongongo-core:0.1.0")
+        }
+    }
+}
+```
+
+The root coordinate resolves to the matching target artifact through Gradle
+metadata. The current release publishes:
+
+- `io.github.misut:mongongo-core`
+- `io.github.misut:mongongo-core-jvm`
+- `io.github.misut:mongongo-core-macosarm64`
+
 ## Build from source
 
 Run commands from the repository root so `mise` resolves the repo-local tools:
@@ -53,6 +77,7 @@ Run commands from the repository root so `mise` resolves the repo-local tools:
 ```sh
 mise install
 mise exec -- ./gradlew :mongongo-core:check
+mise exec -- ./gradlew :mongongo-core:publishToMavenLocal
 ```
 
 If `mise` reports that the repo config is not trusted, trust only this checkout
@@ -62,9 +87,14 @@ or worktree before retrying:
 mise trust .
 ```
 
-No Maven artifact is published yet. See
-[`docs/release-notes/v0.1.md`](docs/release-notes/v0.1.md) for the current
-release-candidate packaging checklist.
+Local release validation uses the same target set as CI:
+
+```sh
+mise exec -- ./gradlew :mongongo-core:spotlessCheck :mongongo-core:jvmTest :mongongo-core:macosArm64Test
+mise exec -- ./gradlew :mongongo-core:check
+mise exec -- ./gradlew :mongongo-core:publishToMavenLocal
+git diff --check
+```
 
 ## Connection strings
 
@@ -387,6 +417,25 @@ MONGONGO_TRANSACTION_TEST_URI='mongodb://127.0.0.1:27017/app?replicaSet=rs0' \
     mise exec -- ./gradlew :mongongo-core:macosArm64Test --rerun-tasks
 ```
 
+## Release workflow
+
+Releases are driven by tags such as `v0.1.0`. The workflow validates Spotless,
+JVM tests, macOS Arm64 tests, and local Maven publishing before attempting any
+remote publication.
+
+Remote Maven publication is intentionally gated by secrets. Configure all of
+these before pushing a release tag:
+
+- `MAVEN_PUBLISHING_REPOSITORY_URL`
+- `MAVEN_PUBLISHING_USERNAME`
+- `MAVEN_PUBLISHING_PASSWORD`
+- `SIGNING_IN_MEMORY_KEY`
+- `SIGNING_IN_MEMORY_KEY_PASSWORD`
+
+If any required secret is missing, the publish job fails before the GitHub
+Release is created. This prevents a tag workflow from silently pretending that
+Maven artifacts were published.
+
 ## Design notes
 
 - The default public API works with `BsonDocument` and `BsonValue` types.
@@ -425,4 +474,4 @@ MONGONGO_TRANSACTION_TEST_URI='mongodb://127.0.0.1:27017/app?replicaSet=rs0' \
 
 ## License
 
-This repository does not currently contain a license file.
+mongongo is available under the [MIT License](LICENSE).
