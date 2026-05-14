@@ -578,6 +578,55 @@ class NativeMongoSmokeTest {
     }
 
     @Test
+    fun typedReplaceOneAgainstFakeOpMsgServerUsesSerializedFieldNames() = runTest {
+        val id = BsonObjectId.fromHex("0000000000000000000000ab")
+
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                val updateCommand = receive()
+                assertEquals(BsonString("native_books"), updateCommand.body["update"])
+                assertEquals(BsonString("native_library"), updateCommand.body["\$db"])
+                val updates = updateCommand.body["updates"] as BsonArray
+                val statement = updates.values.single() as BsonDocument
+                assertEquals(BsonDocument("_id" to id), statement["q"])
+                assertEquals(
+                    BsonDocument(
+                        "_id" to id,
+                        "book_title" to BsonString("Dune Messiah"),
+                        "published_year" to BsonInt32(1969)
+                    ),
+                    statement["u"]
+                )
+                assertEquals(BsonBoolean(false), statement["multi"])
+                reply(
+                    updateCommand,
+                    BsonDocument(
+                        "ok" to BsonDouble(1.0),
+                        "n" to BsonInt32(1),
+                        "nModified" to BsonInt32(1)
+                    )
+                )
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                val result =
+                    client
+                        .database("native_library")
+                        .typedCollection<NativeSerialNamedBook>("native_books")
+                        .replaceOne(
+                            filter = { NativeSerialNamedBook::id eq id },
+                            replacement = NativeSerialNamedBook(id = id, title = "Dune Messiah", year = 1969)
+                        )
+                assertEquals(1L, result.modifiedCount)
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
     fun updatesManyAgainstFakeOpMsgServer() = runTest {
         val filter = BsonDocument("status" to BsonString("draft"))
         val update = BsonDocument("\$set" to BsonDocument("status" to BsonString("reviewed")))

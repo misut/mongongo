@@ -24,6 +24,18 @@ private data class EmbeddedTypedBook(
     val tags: List<String> = emptyList()
 )
 
+@Serializable
+private data class EmbeddedTypedCrudBook(
+    @SerialName("_id")
+    val id: BsonObjectId,
+    @SerialName("book_title")
+    val title: String,
+    @SerialName("author_name")
+    val author: String,
+    val revision: Int = 0,
+    val status: String = "draft"
+)
+
 class EmbedMongoTest {
     private val shardedEmbedMongoCluster = ShardedEmbedMongoCluster()
     private val syncClient
@@ -242,6 +254,62 @@ class EmbedMongoTest {
     }
 
     @Test
+    fun typedTransactionsCommitAndAbortAgainstEmbeddedMongo() = runTest {
+        val databaseName = "mongongo_test"
+        val committedCollectionName = "typed_transaction_commit_${Random.nextInt(0, Int.MAX_VALUE)}"
+        val abortedCollectionName = "typed_transaction_abort_${Random.nextInt(0, Int.MAX_VALUE)}"
+        val committedId = BsonObjectId.fromHex("00000000000000000000c001")
+        val abortedId = BsonObjectId.fromHex("00000000000000000000a001")
+        val client = MongoClient.connect(shardedEmbedMongoCluster.connectionString.connectionString)
+        try {
+            try {
+                client.withTransaction {
+                    val collection = database(databaseName).typedCollection<EmbeddedTypedCrudBook>(committedCollectionName)
+                    collection.insertOne(EmbeddedTypedCrudBook(committedId, "Committed", "Ursula Le Guin"))
+                    assertEquals(
+                        EmbeddedTypedCrudBook(committedId, "Committed", "Ursula Le Guin"),
+                        collection.findOne { EmbeddedTypedCrudBook::id eq committedId }
+                    )
+                }
+
+                val failure =
+                    assertFailsWith<IllegalStateException> {
+                        client.withTransaction {
+                            val collection = database(databaseName).typedCollection<EmbeddedTypedCrudBook>(abortedCollectionName)
+                            collection.insertOne(EmbeddedTypedCrudBook(abortedId, "Aborted", "Octavia Butler"))
+                            error("rollback")
+                        }
+                    }
+                assertEquals("rollback", failure.message)
+            } catch (exception: MongoCommandException) {
+                if (exception.isEmbeddedTransactionSupportFailure()) {
+                    return@runTest
+                }
+                throw exception
+            }
+        } finally {
+            client.close()
+        }
+
+        syncClient.use { verifier ->
+            val database = verifier.getDatabase(databaseName)
+            val committed =
+                database
+                    .getCollection<Document>(committedCollectionName)
+                    .find(Document("_id", ObjectId(committedId.bytes.toByteArray())))
+                    .first()
+            assertEquals("Committed", committed.getString("book_title"))
+            assertEquals("Ursula Le Guin", committed.getString("author_name"))
+
+            val abortedCount =
+                database
+                    .getCollection<Document>(abortedCollectionName)
+                    .countDocuments(Document("_id", ObjectId(abortedId.bytes.toByteArray())))
+            assertEquals(0L, abortedCount)
+        }
+    }
+
+    @Test
     fun insertsDocumentWithMongongoClientAndReadsItWithJvmDriver() = runTest {
         val databaseName = "mongongo_test"
         val collectionName = "insert_one_${Random.nextInt(0, Int.MAX_VALUE)}"
@@ -368,6 +436,83 @@ class EmbedMongoTest {
                     .find(Document("_id", ObjectId(insertedId.bytes.toByteArray())))
                     .first()
             assertEquals("The Fifth Season", stored.getString("title"))
+        }
+    }
+
+    @Test
+    fun typedCollectionCrudHappyPathAgainstEmbeddedMongo() = runTest {
+        val databaseName = "mongongo_test"
+        val collectionName = "typed_crud_${Random.nextInt(0, Int.MAX_VALUE)}"
+        val firstId = BsonObjectId.fromHex("00000000000000000000f001")
+        val secondId = BsonObjectId.fromHex("00000000000000000000f002")
+        val thirdId = BsonObjectId.fromHex("00000000000000000000f003")
+        val archivedId = BsonObjectId.fromHex("00000000000000000000f004")
+        val client = MongoClient.connect(shardedEmbedMongoCluster.connectionString.connectionString)
+        try {
+            val books = client.database(databaseName).typedCollection<EmbeddedTypedCrudBook>(collectionName)
+            books.insertOne(EmbeddedTypedCrudBook(firstId, "Dune", "Frank Herbert", revision = 1))
+            books.insertMany(
+                listOf(
+                    EmbeddedTypedCrudBook(secondId, "Kindred", "Octavia Butler"),
+                    EmbeddedTypedCrudBook(thirdId, "Dawn", "Octavia Butler"),
+                    EmbeddedTypedCrudBook(archivedId, "Archive", "Frank Herbert", status = "archived")
+                )
+            )
+
+            assertEquals(EmbeddedTypedCrudBook(firstId, "Dune", "Frank Herbert", revision = 1), books.findOne { EmbeddedTypedCrudBook::id eq firstId })
+            assertEquals(
+                listOf(
+                    EmbeddedTypedCrudBook(secondId, "Kindred", "Octavia Butler"),
+                    EmbeddedTypedCrudBook(thirdId, "Dawn", "Octavia Butler")
+                ),
+                books.find(limit = 10) { EmbeddedTypedCrudBook::author eq "Octavia Butler" }.toList()
+            )
+
+            assertEquals(
+                1L,
+                books.updateOne(
+                    filter = { EmbeddedTypedCrudBook::id eq firstId },
+                    update = { set(EmbeddedTypedCrudBook::title, "Dune Messiah") }
+                ).modifiedCount
+            )
+            assertEquals(
+                2L,
+                books.updateMany(
+                    filter = { EmbeddedTypedCrudBook::author eq "Octavia Butler" },
+                    update = { inc(EmbeddedTypedCrudBook::revision, 1) }
+                ).modifiedCount
+            )
+            assertEquals(
+                1L,
+                books.replaceOne(
+                    filter = { EmbeddedTypedCrudBook::id eq firstId },
+                    replacement =
+                        EmbeddedTypedCrudBook(
+                            id = firstId,
+                            title = "Children of Dune",
+                            author = "Frank Herbert",
+                            revision = 2,
+                            status = "published"
+                        )
+                ).modifiedCount
+            )
+            assertEquals(
+                EmbeddedTypedCrudBook(firstId, "Children of Dune", "Frank Herbert", revision = 2, status = "published"),
+                books.findOne { EmbeddedTypedCrudBook::id eq firstId }
+            )
+
+            assertEquals(1L, books.deleteOne { EmbeddedTypedCrudBook::id eq firstId }.deletedCount)
+            assertEquals(1L, books.deleteMany { EmbeddedTypedCrudBook::status eq "archived" }.deletedCount)
+            assertNull(books.findOne { EmbeddedTypedCrudBook::id eq firstId })
+        } finally {
+            client.close()
+        }
+
+        syncClient.use { verifier ->
+            val collection = verifier.getDatabase(databaseName).getCollection<Document>(collectionName)
+            assertEquals(2L, collection.countDocuments(Document("author_name", "Octavia Butler")))
+            assertEquals(0L, collection.countDocuments(Document("_id", ObjectId(firstId.bytes.toByteArray()))))
+            assertEquals(0L, collection.countDocuments(Document("status", "archived")))
         }
     }
 

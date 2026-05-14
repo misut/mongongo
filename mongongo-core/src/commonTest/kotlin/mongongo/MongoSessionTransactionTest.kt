@@ -1,9 +1,18 @@
 package mongongo
 
 import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.SerialName
+import kotlinx.serialization.Serializable
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+
+@Serializable
+private data class SessionTypedBook(
+    @SerialName("book_title")
+    val title: String,
+    val status: String = "draft"
+)
 
 class MongoSessionTransactionTest {
     @Test
@@ -251,11 +260,95 @@ class MongoSessionTransactionTest {
             try {
                 val found =
                     client.withTransaction {
-                        val collection = database("library").collection("books", TestBook.serializer())
+                        val collection = database("library").typedCollection<TestBook>("books")
                         collection.insertOne(TestBook("Kindred"))
-                        collection.findOne(BsonDocument("title" to BsonString("Kindred")))
+                        collection.findOne { TestBook::title eq "Kindred" }
                     }
                 assertEquals(TestBook("Kindred"), found)
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
+    fun sessionAndSessionTransactionBoundTypedCollectionsPreserveContextAndSerializerFields() = runTest {
+        val lsid = testSessionId()
+
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+                expectStartSession(lsid)
+
+                val sessionInsert = receive()
+                assertEquals(listOf("insert", "documents", "ordered", "\$db", "lsid"), sessionInsert.body.values.keys.toList())
+                assertEquals(lsid, sessionInsert.body["lsid"])
+                val inserted =
+                    (sessionInsert.body["documents"] as BsonArray)
+                        .values
+                        .single() as BsonDocument
+                assertEquals(BsonString("Session Book"), inserted["book_title"])
+                reply(sessionInsert, BsonDocument("ok" to BsonDouble(1.0), "n" to BsonInt32(1)))
+
+                val sessionFind = receive()
+                assertEquals(listOf("find", "filter", "limit", "singleBatch", "\$db", "lsid"), sessionFind.body.values.keys.toList())
+                assertEquals(lsid, sessionFind.body["lsid"])
+                assertEquals(BsonDocument("book_title" to BsonString("Session Book")), sessionFind.body["filter"])
+                reply(
+                    sessionFind,
+                    BsonDocument(
+                        "cursor" to
+                            BsonDocument(
+                                "id" to BsonInt64(0),
+                                "ns" to BsonString("library.books"),
+                                "firstBatch" to
+                                    BsonArray(
+                                        listOf(BsonDocument("book_title" to BsonString("Session Book")))
+                                    )
+                            ),
+                        "ok" to BsonDouble(1.0)
+                    )
+                )
+
+                val transactionUpdate = receive()
+                assertEquals(
+                    listOf("update", "updates", "ordered", "\$db", "lsid", "txnNumber", "startTransaction", "autocommit"),
+                    transactionUpdate.body.values.keys.toList()
+                )
+                assertEquals(lsid, transactionUpdate.body["lsid"])
+                assertEquals(BsonInt64(1), transactionUpdate.body["txnNumber"])
+                assertEquals(BsonBoolean(true), transactionUpdate.body["startTransaction"])
+                assertEquals(BsonBoolean(false), transactionUpdate.body["autocommit"])
+                val statement =
+                    (transactionUpdate.body["updates"] as BsonArray)
+                        .values
+                        .single() as BsonDocument
+                assertEquals(BsonDocument("book_title" to BsonString("Session Book")), statement["q"])
+                assertEquals(BsonDocument("\$set" to BsonDocument("status" to BsonString("published"))), statement["u"])
+                reply(
+                    transactionUpdate,
+                    BsonDocument("ok" to BsonDouble(1.0), "n" to BsonInt32(1), "nModified" to BsonInt32(1))
+                )
+
+                expectCommit(lsid, txnNumber = 1)
+                expectEndSessions(lsid)
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                client.withSession {
+                    val sessionBooks = database("library").typedCollection<SessionTypedBook>("books")
+                    sessionBooks.insertOne(SessionTypedBook("Session Book"))
+                    assertEquals(SessionTypedBook("Session Book"), sessionBooks.findOne { SessionTypedBook::title eq "Session Book" })
+
+                    withTransaction {
+                        val transactionBooks = database("library").typedCollection<SessionTypedBook>("books")
+                        transactionBooks.updateOne(
+                            filter = { SessionTypedBook::title eq "Session Book" },
+                            update = { set(SessionTypedBook::status, "published") }
+                        )
+                    }
+                }
             } finally {
                 client.close()
             }

@@ -25,6 +25,18 @@ private data class SerialNamedUpdateDslBook(
     val year: Int = 0
 )
 
+@Serializable
+private data class TypedCrudBook(
+    @SerialName("_id")
+    val id: BsonObjectId,
+    @SerialName("book_title")
+    val title: String,
+    @SerialName("author_name")
+    val author: String,
+    val revision: Int = 0,
+    val status: String = "draft"
+)
+
 class MongoCollectionDslTest {
     @Test
     fun insertOneDslBlockBuildsBsonDocument() = runTest {
@@ -375,7 +387,157 @@ class MongoCollectionDslTest {
             }
         }
     }
+
+    @Test
+    fun typedCollectionCrudHappyPathSendsSerializerAwareCommandBodies() = runTest {
+        val firstId = BsonObjectId.fromHex("000000000000000000000101")
+        val secondId = BsonObjectId.fromHex("000000000000000000000102")
+        val thirdId = BsonObjectId.fromHex("000000000000000000000103")
+
+        withFakeMongoServer(
+            handler = {
+                expectHello()
+
+                val insertOne = receive()
+                val inserted = insertOne.singleDocument("documents")
+                assertEquals(BsonString("books"), insertOne.body["insert"])
+                assertEquals(BsonString("Dune"), inserted["book_title"])
+                assertEquals(BsonString("Frank Herbert"), inserted["author_name"])
+                assertEquals(BsonInt32(1), inserted["revision"])
+                reply(insertOne, BsonDocument("ok" to BsonDouble(1.0), "n" to BsonInt32(1)))
+
+                val insertMany = receive()
+                val insertedMany = insertMany.body["documents"].asBson<BsonArray>().values.map { it.asBson<BsonDocument>() }
+                assertEquals(listOf(secondId, thirdId), insertedMany.map { it["_id"] })
+                assertEquals(listOf(BsonString("Octavia Butler"), BsonString("Octavia Butler")), insertedMany.map { it["author_name"] })
+                reply(insertMany, BsonDocument("ok" to BsonDouble(1.0), "n" to BsonInt32(2)))
+
+                val findOne = receive()
+                assertEquals(BsonDocument("_id" to firstId), findOne.body["filter"])
+                reply(
+                    findOne,
+                    BsonDocument(
+                        "cursor" to
+                            BsonDocument(
+                                "id" to BsonInt64(0),
+                                "ns" to BsonString("library.books"),
+                                "firstBatch" to BsonArray(listOf(inserted))
+                            ),
+                        "ok" to BsonDouble(1.0)
+                    )
+                )
+
+                val find = receive()
+                assertEquals(BsonDocument("author_name" to BsonString("Octavia Butler")), find.body["filter"])
+                assertEquals(BsonInt32(10), find.body["limit"])
+                reply(
+                    find,
+                    BsonDocument(
+                        "cursor" to
+                            BsonDocument(
+                                "id" to BsonInt64(0),
+                                "ns" to BsonString("library.books"),
+                                "firstBatch" to BsonArray(insertedMany)
+                            ),
+                        "ok" to BsonDouble(1.0)
+                    )
+                )
+
+                val updateOne = receive()
+                val updateOneStatement = updateOne.singleDocument("updates")
+                assertEquals(BsonDocument("_id" to firstId), updateOneStatement["q"])
+                assertEquals(BsonDocument("\$set" to BsonDocument("book_title" to BsonString("Dune Messiah"))), updateOneStatement["u"])
+                reply(updateOne, BsonDocument("ok" to BsonDouble(1.0), "n" to BsonInt32(1), "nModified" to BsonInt32(1)))
+
+                val updateMany = receive()
+                val updateManyStatement = updateMany.singleDocument("updates")
+                assertEquals(BsonDocument("author_name" to BsonString("Octavia Butler")), updateManyStatement["q"])
+                assertEquals(BsonBoolean(true), updateManyStatement["multi"])
+                assertEquals(BsonDocument("\$inc" to BsonDocument("revision" to BsonInt32(1))), updateManyStatement["u"])
+                reply(updateMany, BsonDocument("ok" to BsonDouble(1.0), "n" to BsonInt32(2), "nModified" to BsonInt32(2)))
+
+                val replaceOne = receive()
+                val replaceStatement = replaceOne.singleDocument("updates")
+                assertEquals(BsonDocument("_id" to firstId), replaceStatement["q"])
+                assertEquals(
+                    BsonDocument(
+                        "_id" to firstId,
+                        "book_title" to BsonString("Children of Dune"),
+                        "author_name" to BsonString("Frank Herbert"),
+                        "revision" to BsonInt32(2),
+                        "status" to BsonString("published")
+                    ),
+                    replaceStatement["u"]
+                )
+                reply(replaceOne, BsonDocument("ok" to BsonDouble(1.0), "n" to BsonInt32(1), "nModified" to BsonInt32(1)))
+
+                val deleteOne = receive()
+                val deleteOneStatement = deleteOne.singleDocument("deletes")
+                assertEquals(BsonDocument("_id" to firstId), deleteOneStatement["q"])
+                assertEquals(BsonInt32(1), deleteOneStatement["limit"])
+                reply(deleteOne, BsonDocument("ok" to BsonDouble(1.0), "n" to BsonInt32(1)))
+
+                val deleteMany = receive()
+                val deleteManyStatement = deleteMany.singleDocument("deletes")
+                assertEquals(BsonDocument("status" to BsonString("archived")), deleteManyStatement["q"])
+                assertEquals(BsonInt32(0), deleteManyStatement["limit"])
+                reply(deleteMany, BsonDocument("ok" to BsonDouble(1.0), "n" to BsonInt32(2)))
+            }
+        ) { uri ->
+            val client = MongoClient.connect(uri)
+            try {
+                val books = client.database("library").typedCollection<TypedCrudBook>("books")
+                books.insertOne(TypedCrudBook(firstId, "Dune", "Frank Herbert", revision = 1))
+                books.insertMany(
+                    listOf(
+                        TypedCrudBook(secondId, "Kindred", "Octavia Butler"),
+                        TypedCrudBook(thirdId, "Dawn", "Octavia Butler")
+                    )
+                )
+
+                assertEquals(TypedCrudBook(firstId, "Dune", "Frank Herbert", revision = 1), books.findOne { TypedCrudBook::id eq firstId })
+                assertEquals(
+                    listOf(
+                        TypedCrudBook(secondId, "Kindred", "Octavia Butler"),
+                        TypedCrudBook(thirdId, "Dawn", "Octavia Butler")
+                    ),
+                    books.find(limit = 10) { TypedCrudBook::author eq "Octavia Butler" }.toList()
+                )
+
+                books.updateOne(
+                    filter = { TypedCrudBook::id eq firstId },
+                    update = { set(TypedCrudBook::title, "Dune Messiah") }
+                )
+                books.updateMany(
+                    filter = { TypedCrudBook::author eq "Octavia Butler" },
+                    update = { inc(TypedCrudBook::revision, 1) }
+                )
+                books.replaceOne(
+                    filter = { TypedCrudBook::id eq firstId },
+                    replacement =
+                        TypedCrudBook(
+                            id = firstId,
+                            title = "Children of Dune",
+                            author = "Frank Herbert",
+                            revision = 2,
+                            status = "published"
+                        )
+                )
+                books.deleteOne { TypedCrudBook::id eq firstId }
+                books.deleteMany { TypedCrudBook::status eq "archived" }
+            } finally {
+                client.close()
+            }
+        }
+    }
 }
 
 private inline fun <reified T : BsonValue> BsonValue?.asBson(): T =
     this as? T ?: error("Unexpected BSON value $this")
+
+private fun OpMsgFrame.singleDocument(name: String): BsonDocument =
+    body[name]
+        .asBson<BsonArray>()
+        .values
+        .single()
+        .asBson()

@@ -1089,6 +1089,12 @@ public class MongoCollection<T : Any> internal constructor(
             upsert = upsert
         )
 
+    public suspend fun replaceOne(
+        filter: TypedBsonFilterBuilder<T>.() -> Unit,
+        replacement: T,
+        upsert: Boolean = false
+    ): UpdateResult = replaceOne(filter = buildFilter(filter), replacement = codec.encode(replacement), upsert = upsert)
+
     public suspend fun findOne(block: TypedBsonFilterBuilder<T>.() -> Unit): T? =
         findOne(buildFilter(block))
 
